@@ -61,11 +61,11 @@ const LocationFinder = () => {
         <div className="bg-red-50 border border-red-200 text-red-800 rounded-lg p-4 mb-6">
           <p className="font-medium">Error</p>
           <p>{error}</p>
-          <Button 
-            text="Try Again" 
+          <button 
             onClick={handleFindLocation}
-            className="mt-4 bg-red-600 hover:bg-red-700 text-white font-medium py-2 px-4 rounded-lg"
-          />
+            className="mt-4 bg-red-600 hover:bg-red-700 text-white font-medium py-2 px-4 rounded-full">
+            Try Again
+          </button>
         </div>
       )}
       
