@@ -13,39 +13,57 @@ const admin = require('../config/firebase-admin');
  * @returns {Promise<Object>} Newly created provider
  */
 const registerProvider = async (firebaseId, name, email, phone, address) => {
-  // Check if provider with this email already exists
-  const existingProvider = await Provider.findOne({ email });
-  if (existingProvider) {
-    throw new Error('Provider with this email already exists');
-  }
-  
-  // Check if provider with this Firebase ID already exists
-  const existingFirebaseProvider = await Provider.findOne({ firebaseId });
-  if (existingFirebaseProvider) {
-    throw new Error('Provider account already exists for this user');
-  }
-  
-  // Create new provider
-  const provider = await Provider.create({
-    firebaseId,
-    name,
-    email,
-    phone,
-    address,
-    verified: false // New providers start as unverified
-  });
-  
-  // Add custom claim to Firebase user
   try {
-    await admin.auth().setCustomUserClaims(firebaseId, { isProvider: true });
+    // Check if provider with this email already exists
+    const existingProvider = await Provider.findOne({ email });
+    if (existingProvider) {
+      throw new Error('Provider with this email already exists');
+    }
+    
+    // Check if provider with this Firebase ID already exists
+    const existingFirebaseProvider = await Provider.findOne({ firebaseId });
+    if (existingFirebaseProvider) {
+      throw new Error('Provider account already exists for this user');
+    }
+    
+    // Create new provider
+    const provider = await Provider.create({
+      firebaseId,
+      name,
+      email,
+      phone,
+      address,
+      verified: false // New providers start as unverified
+    });
+    
+    // Add custom claim to Firebase user
+    try {
+      await admin.auth().setCustomUserClaims(firebaseId, { isProvider: true });
+    } catch (error) {
+      // If adding custom claim fails, delete the provider from the database
+      await Provider.findByIdAndDelete(provider._id);
+      throw new Error(`Failed to set provider role: ${error.message}`);
+    }
+    
+    return provider;
   } catch (error) {
-    // If adding custom claim fails, delete the provider from the database
-    await Provider.findByIdAndDelete(provider._id);
-    throw new Error(`Failed to set provider role: ${error.message}`);
+    console.error('Provider registration error:', {
+      message: error.message,
+      stack: error.stack,
+      code: error.code
+    });
+    
+    // If this is a MongoDB error, provide more specific error message
+    if (error.name === 'MongoError' || error.name === 'MongoServerError') {
+      if (error.code === 11000) {
+        throw new Error('A provider with this email or Firebase ID already exists');
+      }
+    }
+    
+    throw error;
   }
-  
-  return provider;
-};
+}; 
+
 
 /**
  * Get provider by Firebase ID

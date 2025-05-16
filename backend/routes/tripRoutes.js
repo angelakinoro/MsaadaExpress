@@ -5,26 +5,34 @@ const {
   getTripById,
   createTrip,
   updateTripStatus,
-  addTripRating
+  addTripRating,
+  refreshTripStatus
 } = require('../controllers/tripController');
 const {
   verifyFirebaseToken,
-  isProvider
+  isProvider,
+  protect
 } = require('../middleware/authMiddleware');
 
 // Get all trips (filtered by user or provider)
 router.get('/', verifyFirebaseToken, getTrips);
 
-// Get trip by ID
-router.get('/:id', verifyFirebaseToken, getTripById);
-
 // Create trip (user only)
 router.post('/', verifyFirebaseToken, createTrip);
 
-// Update trip status
-router.put('/:id/status', verifyFirebaseToken, updateTripStatus);
+// Routes with ID parameter - specific endpoints first
+router.get('/:id/status/refresh', verifyFirebaseToken, (req, res) => {
+  // This route specifically forces a re-emission of socket events
+  req.forceSocketEmission = true;
+  refreshTripStatus(req, res);
+});
 
-// Add rating to trip (user only)
+router.get('/:id/refresh', verifyFirebaseToken, refreshTripStatus);
+router.put('/:id/status', verifyFirebaseToken, isProvider, updateTripStatus);
+router.post('/:id/cancel', verifyFirebaseToken, updateTripStatus);
 router.put('/:id/rating', verifyFirebaseToken, addTripRating);
+
+// Generic ID route should be last
+router.get('/:id', verifyFirebaseToken, getTripById);
 
 module.exports = router;

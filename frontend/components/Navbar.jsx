@@ -6,8 +6,32 @@ import { GiAmbulance } from "react-icons/gi";
 import { useAuth } from '@/lib/auth';
 
 const Navbar = () => {
-  const { user, logout } = useAuth();
+  // Make sure to get loading from useAuth
+  const { user, userRole, signout, loading } = useAuth();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  
+  // Check if user is a provider based on userRole
+  const isProvider = userRole === 'provider';
+
+  // Add loading state handling
+  if (loading) {
+    return (
+      <nav className="bg-red-600 text-white shadow-lg">
+        <div className="max-w-7xl mx-auto px-4 py-3 flex justify-between items-center">
+          <div className="flex items-center">
+            <GiAmbulance size={56} />
+            <div className="px-2 mt-2">
+              <h1 className="text-2xl font-bold tracking-tighter">Msaada Express</h1>
+            </div>
+          </div>
+          <div className="animate-pulse flex space-x-4">
+            <div className="rounded-md bg-red-500 h-8 w-16"></div>
+            <div className="rounded-md bg-red-500 h-8 w-16"></div>
+          </div>
+        </div>
+      </nav>
+    );
+  }
 
   const toggleMobileMenu = () => {
     setMobileMenuOpen(!mobileMenuOpen);
@@ -15,7 +39,7 @@ const Navbar = () => {
 
   const handleLogout = async () => {
     try {
-      await logout();
+      await signout();
       setMobileMenuOpen(false);
     } catch (error) {
       console.error('Logout error:', error);
@@ -41,10 +65,28 @@ const Navbar = () => {
             <Link href="/" className="py-2 px-3 rounded-md hover:bg-red-700 transition-colors">
               Home
             </Link>
-            <Link href="/find-ambulance" className="py-2 px-3 rounded-md hover:bg-red-700 transition-colors">
-              Find Ambulance
-            </Link>
             
+            {isProvider ? (
+              <>
+                {/* Provider links */}
+                <Link href="/provider/dashboard" className="py-2 px-3 rounded-md hover:bg-red-700 transition-colors">
+                  Dashboard
+                </Link>
+                <Link href="/provider/trips" className="py-2 px-3 rounded-md hover:bg-red-700 transition-colors">
+                  Trips
+                </Link>
+                <Link href="/provider/ambulances" className="py-2 px-3 rounded-md hover:bg-red-700 transition-colors">
+                  Ambulances
+                </Link>
+              </>
+            ) : (
+              <>
+                {/* Regular user links - only show Find Ambulance for non-providers */}
+                <Link href="/find-ambulance" className="py-2 px-3 rounded-md hover:bg-red-700 transition-colors">
+                  Find Ambulance
+                </Link>
+              </>
+            )}
             
             {/* Auth links */}
             {user ? (
@@ -66,6 +108,10 @@ const Navbar = () => {
                 <Link href="/auth/signup"
                   className="bg-white text-red-600 hover:bg-gray-100 py-2 px-4 rounded-md transition-colors">
                   Sign Up
+                </Link>
+                <Link href="/provider/login"
+                  className="bg-white text-red-600 hover:bg-gray-100 py-2 px-4 rounded-md transition-colors">
+                  Provider Login
                 </Link>
               </div>
             )}
@@ -104,12 +150,36 @@ const Navbar = () => {
               onClick={() => setMobileMenuOpen(false)}>
               Home
             </Link>
-            <Link href="/find-ambulance"
-              className="block py-2 px-3 rounded-md hover:bg-red-700 transition-colors"
-              onClick={() => setMobileMenuOpen(false)}>
-              Find Ambulance
-            </Link>
-           
+            
+            {isProvider ? (
+              <>
+                {/* Provider mobile links */}
+                <Link href="/provider/dashboard"
+                  className="block py-2 px-3 rounded-md hover:bg-red-700 transition-colors"
+                  onClick={() => setMobileMenuOpen(false)}>
+                  Dashboard
+                </Link>
+                <Link href="/provider/trips"
+                  className="block py-2 px-3 rounded-md hover:bg-red-700 transition-colors"
+                  onClick={() => setMobileMenuOpen(false)}>
+                  Trips
+                </Link>
+                <Link href="/provider/ambulances"
+                  className="block py-2 px-3 rounded-md hover:bg-red-700 transition-colors"
+                  onClick={() => setMobileMenuOpen(false)}>
+                  Ambulances
+                </Link>
+              </>
+            ) : (
+              <>
+                {/* Regular user mobile links - only show Find Ambulance for non-providers */}
+                <Link href="/find-ambulance"
+                  className="block py-2 px-3 rounded-md hover:bg-red-700 transition-colors"
+                  onClick={() => setMobileMenuOpen(false)}>
+                  Find Ambulance
+                </Link>
+              </>
+            )}
             
             {/* Mobile auth links */}
             <div className="pt-4 border-t border-red-700">
@@ -136,6 +206,11 @@ const Navbar = () => {
                     className="bg-white text-red-600 hover:bg-red-500 block px-3 py-2 rounded-md transition-colors"
                     onClick={() => setMobileMenuOpen(false)}>
                     Sign Up
+                  </Link>
+                  <Link href="/provider/login"
+                    className="bg-white text-red-600 hover:bg-red-500 block px-3 py-2 rounded-md transition-colors"
+                    onClick={() => setMobileMenuOpen(false)}>
+                    Provider Login
                   </Link>
                 </div>
               )}

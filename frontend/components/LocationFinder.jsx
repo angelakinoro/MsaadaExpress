@@ -4,7 +4,7 @@ import React, { useEffect } from 'react'
 import { useState } from "react";
 import Button from './Button';
 import AmbulanceList from './AmbulanceList';
-import { getCurrentLocation, findNearestAmbulances } from "@/utils/locationService";
+import { getCurrentLocation, getNearestAmbulances } from "@/utils/locationService";
 import dynamic from 'next/dynamic';
 
 // Properly load the map component only on client-side
@@ -37,7 +37,7 @@ const LocationFinder = () => {
       setStage("searchingAmbulances");
       
       // 2. Search for ambulances
-      const nearbyAmbulances = await findNearestAmbulances(location);
+      const nearbyAmbulances = await getNearestAmbulances(location);
       setAmbulances(nearbyAmbulances);
       setStage("results");
     } catch (err) {

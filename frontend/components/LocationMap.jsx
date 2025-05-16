@@ -61,15 +61,14 @@ const createLeafletMap = async (mapContainer, userLocation, ambulances) => {
     });
     
     ambulances.forEach(ambulance => {
-      if (ambulance.coordinates) {
-        const ambulanceLat = ambulance.coordinates.latitude;
-        const ambulanceLng = ambulance.coordinates.longitude;
+      if (ambulance.location?.coordinates) {
+        const [lng, lat] = ambulance.location.coordinates;
         
-        if (typeof ambulanceLat === 'number' && typeof ambulanceLng === 'number') {
-          points.push([ambulanceLat, ambulanceLng]);
+        if (typeof lat === 'number' && typeof lng === 'number') {
+          points.push([lat, lng]);
           
           const marker = L.marker(
-            [ambulanceLat, ambulanceLng],
+            [lat, lng],
             { icon: ambulanceIcon }
           ).addTo(map);
           

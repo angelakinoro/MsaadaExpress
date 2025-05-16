@@ -7,7 +7,6 @@ const {
 } = require('../middleware/authMiddleware');
 
 // These routes are placeholders for future provider management features
-// They will be implemented when needed
 
 // Get all providers (admin only)
 router.get('/', (req, res) => {

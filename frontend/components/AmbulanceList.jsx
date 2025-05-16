@@ -30,7 +30,7 @@ const AmbulanceList = ({ ambulances }) => {
     <div className="space-y-4">
       {sortedAmbulances.map((ambulance, index) => (
         <div
-          key={ambulance.id}
+          key={ambulance._id}
           className={`relative border ${index === 0 ? 'border-2 border-green-500' : 'border-gray-200'} 
                      rounded-lg p-4 flex flex-col md:flex-row md:items-center md:justify-between 
                      hover:bg-gray-50 transition-colors ${index === 0 ? 'bg-green-50' : ''}`}

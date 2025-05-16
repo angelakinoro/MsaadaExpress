@@ -34,7 +34,21 @@ const registerProvider = asyncHandler(async (req, res) => {
       verified: provider.verified
     });
   } catch (error) {
-    res.status(400);
+    console.error('Provider registration error:', {
+      message: error.message,
+      stack: error.stack,
+      code: error.code
+    });
+    
+    // Handle specific error cases
+    if (error.message.includes('already exists')) {
+      res.status(409); // Conflict
+    } else if (error.name === 'ValidationError') {
+      res.status(400); // Bad Request
+    } else {
+      res.status(500); // Internal Server Error
+    }
+    
     throw error;
   }
 });

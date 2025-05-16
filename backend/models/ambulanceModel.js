@@ -1,76 +1,65 @@
 const mongoose = require('mongoose');
 
-const ambulanceSchema = new mongoose.Schema(
-  {
-    providerId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Provider',
-      required: true,
-    },
-    name: {
-      type: String,
-      required: [true, 'Please add a name'],
-    },
+const ambulanceSchema = new mongoose.Schema({
+  providerId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Provider',
+    required: true
+  },
+  name: {
+    type: String,
+    required: true
+  },
+  registration: {
+    type: String,
+    required: true
+  },
+  type: {
+    type: String,
+    required: true
+  },
+  capacity: {
+    type: Number,
+    default: 1
+  },
+  features: [String],
+  driver: {
+    name: String,
+    contactNumber: String,
+    license: String
+  },
+  location: {
     type: {
       type: String,
-      required: [true, 'Please add ambulance type'],
-      enum: ['BASIC', 'INTERMEDIATE', 'ADVANCED', 'SPECIALTY'],
+      enum: ['Point'],
+      default: 'Point'
     },
-    registration: {
-      type: String,
-      required: [true, 'Please add registration number'],
-      unique: true,
-    },
-    equipment: [
-      {
-        type: String,
-      },
-    ],
-    capacity: {
-      type: Number,
-      default: 1,
-    },
-    status: {
-      type: String,
-      enum: ['AVAILABLE', 'BUSY', 'OFFLINE'],
-      default: 'OFFLINE',
-    },
-    location: {
-      type: {
-        type: String,
-        enum: ['Point'],
-        default: 'Point',
-      },
-      coordinates: {
-        type: [Number], // [longitude, latitude]
-        default: [0, 0],
-      },
-    },
-    driver: {
-      name: {
-        type: String,
-        required: [true, 'Please add driver name'],
-      },
-      phone: {
-        type: String,
-        required: [true, 'Please add driver phone'],
-      },
-      license: {
-        type: String,
-        required: [true, 'Please add driver license number'],
-      },
-    },
-    lastUpdated: {
-      type: Date,
-      default: Date.now,
-    },
+    coordinates: {
+      type: [Number],  // [longitude, latitude]
+      required: true,
+      default: [0, 0]
+    }
   },
-  {
-    timestamps: true,
+  status: {
+    type: String,
+    enum: ['AVAILABLE', 'BUSY', 'OFFLINE'],
+    default: 'OFFLINE'
+  },
+  lastUpdated: {
+    type: Date,
+    default: Date.now
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now
   }
-);
+}, {
+  timestamps: true
+});
 
-// Create geospatial index for location-based queries
+// Create a geospatial index - CRITICAL for $near queries
 ambulanceSchema.index({ location: '2dsphere' });
+
+ambulanceSchema.index({ status: 1, location: '2dsphere' });
 
 module.exports = mongoose.model('Ambulance', ambulanceSchema);
