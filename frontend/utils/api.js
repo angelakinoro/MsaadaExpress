@@ -31,6 +31,13 @@ export const getAuthToken = async (throwError = true) => {
   const user = auth?.currentUser;
   
   if (!user) {
+    // Try localStorage fallback first
+    const storedToken = localStorage.getItem('authToken');
+    if (storedToken) {
+      console.log('Using stored authentication token');
+      return storedToken;
+    }
+
     if (throwError) {
       throw new Error('User not authenticated');
     }
@@ -38,7 +45,10 @@ export const getAuthToken = async (throwError = true) => {
   }
   
   try {
-    return await user.getIdToken();
+    const token = await user.getIdToken(true); // Force refresh to ensure token is valid
+    // Store in localStorage for fallback use
+    localStorage.setItem('authToken', token);
+    return token;
   } catch (error) {
     console.error('Error getting auth token:', error);
     if (throwError) {
@@ -102,15 +112,56 @@ export const apiRequest = async (endpoint, options = {}, requireAuth = true) => 
         };
         
         // Add auth if needed
-        if (requireAuth && auth?.currentUser) {
+        if (requireAuth) {
           try {
-            const token = await auth.currentUser.getIdToken();
-            requestOptions.headers['Authorization'] = `Bearer ${token}`;
+            // Check if Firebase user is available
+            if (auth?.currentUser) {
+              const forceRefresh = options.forceTokenRefresh || false;
+              const token = await auth.currentUser.getIdToken(forceRefresh);
+              requestOptions.headers['Authorization'] = `Bearer ${token}`;
+              console.log('Added authentication token to request');
+            } 
+            // Check for stored token as fallback
+            else {
+              const storedToken = localStorage.getItem('authToken');
+              if (storedToken) {
+                requestOptions.headers['Authorization'] = `Bearer ${storedToken}`;
+                console.log('Using stored authentication token');
+              } 
+              // Development mode - allow requests without auth for testing
+              else if (process.env.NODE_ENV === 'development') {
+                console.warn('No authentication found but continuing in development mode');
+                
+                // Add the current provider ID as a query parameter for development testing
+                if (endpoint.includes('/trips') && !endpoint.includes('providerId=')) {
+                  const storedUser = JSON.parse(localStorage.getItem('user') || '{}');
+                  const providerId = storedUser.providerId;
+                  
+                  if (providerId) {
+                    // Add providerId to the URL for direct querying during development
+                    const separator = endpoint.includes('?') ? '&' : '?';
+                    endpoint = `${endpoint}${separator}providerId=${providerId}`;
+                    console.log('Added providerId to URL for development:', endpoint);
+                  }
+                }
+              } 
+              // Production mode - throw error
+              else {
+                throw new Error('User not authenticated');
+              }
+            }
           } catch (err) {
-            console.warn('Error getting auth token:', err);
-          }
+            console.error('Authentication error:', err);
+            
+            // In development, continue without auth
+            if (process.env.NODE_ENV === 'development') {
+              console.warn('Continuing without authentication in development mode');
+            } else {
+              throw new Error('Authentication failed: ' + err.message);
+            }
+          }    
         }
-        
+          
         // Add cache busting for GET requests
         if (!options.method || options.method === 'GET') {
           const timestamp = Date.now();
@@ -364,11 +415,27 @@ function getMockDataForEndpoint(endpoint) {
 }
 
 // Convenience methods
-export const get = (endpoint, options = {}, requireAuth = true) => {
+export const get = async (endpoint, options = {}, requireAuth = true) => {
+  // Always get a fresh token for trips endpoints
+  if (endpoint.includes('/trips')) {
+    try {
+      const token = await getAuthToken(false);
+      if (token) {
+        options.headers = {
+          ...options.headers,
+          'Authorization': `Bearer ${token}`
+        };
+        console.log('Added fresh token to trips request');
+      }
+    } catch (err) {
+      console.warn('Error getting fresh token:', err);
+    }
+  }
+  
   return apiRequest(endpoint, { ...options, method: 'GET' }, requireAuth);
 };
 
-export const post = (endpoint, data, options = {}, requireAuth = true) => {
+export const post = async (endpoint, data, options = {}, requireAuth = true) => {
   return apiRequest(
     endpoint,
     {

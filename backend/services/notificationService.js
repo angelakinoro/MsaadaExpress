@@ -58,16 +58,13 @@ const notifyProviderNewRequest = async (provider, trip) => {
    * @returns {Promise<void>}
    */
   const notifyAmbulanceArrival = async (userId, trip, eta) => {
-    // This is a placeholder - no actual implementation yet
     console.log(`🔔 NOTIFICATION: Ambulance arriving soon for user ${userId}`);
     console.log(`   Trip ID: ${trip._id}`);
     console.log(`   ETA: ${eta} minutes`);
     console.log(`   Ambulance: ${trip.ambulanceId?.name || 'Unknown'}`);
     console.log(`   Driver: ${trip.ambulanceId?.driver?.name || 'Unknown'}`);
     
-    // In a real implementation, you would:
-    // 1. Send push notification to user's devices
-    // 2. Send SMS notification with ETA
+    
   };
   
   /**

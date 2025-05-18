@@ -88,7 +88,6 @@ const isProvider = asyncHandler(async (req, res, next) => {
  * Must be used after isProvider
  */
 const isVerifiedProvider = asyncHandler(async (req, res, next) => {
-  // For now, skip verification check as commented in original code
   return next();
   
   /*

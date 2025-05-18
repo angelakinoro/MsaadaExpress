@@ -354,6 +354,86 @@ module.exports = function(io) {
           return false;
         }
       },
+
+        emitTripStatusChanged: function(tripId, oldStatus, newStatus, tripData = null) {
+        try {
+          if (!tripId || !oldStatus || !newStatus) {
+            console.warn('Invalid data provided to emitTripStatusChanged');
+            return false;
+          }
+          
+          console.log(`Emitting trip status changed: ${tripId} (${oldStatus} -> ${newStatus})`);
+          
+          // Create the status update data
+          const statusData = {
+            tripId,
+            oldStatus,
+            newStatus,
+            trip: tripData, // Include full trip data if available
+            timestamp: new Date().toISOString()
+          };
+          
+          // 1. Emit to trip-specific room
+          io.to(`trip-${tripId}`).emit('tripStatusChanged', statusData);
+          
+          // 2. Emit to global status changed channel
+          io.emit('tripStatusChanged', statusData);
+          
+          // 3. If we have trip data, emit to specific user and provider
+          if (tripData) {
+            // Extract user and provider IDs
+            const userId = tripData.userId && 
+              (typeof tripData.userId === 'object' ? 
+                tripData.userId._id.toString() : 
+                tripData.userId.toString());
+                
+            const providerId = tripData.providerId && 
+              (typeof tripData.providerId === 'object' ? 
+                tripData.providerId._id.toString() : 
+                tripData.providerId.toString());
+            
+            // Emit to user room
+            if (userId) {
+              console.log(`Emitting status change to user ${userId}: ${oldStatus} -> ${newStatus}`);
+              io.to(`user-${userId}`).emit('tripStatusChanged', statusData);
+              
+              // Also send as notification
+              this.emitNotification(userId, {
+                type: 'TRIP_STATUS_UPDATE',
+                title: `Trip Status: ${newStatus}`,
+                message: `Your trip status has changed to ${newStatus}`,
+                tripId: tripId,
+                userId: userId,
+                status: newStatus,
+                trip: tripData
+              });
+            }
+            
+            // Emit to provider room
+            if (providerId) {
+              console.log(`Emitting status change to provider ${providerId}: ${oldStatus} -> ${newStatus}`);
+              io.to(`provider-${providerId}`).emit('tripStatusChanged', statusData);
+            }
+          }
+          
+          // 4. For important status transitions, add specific event emissions
+          if (newStatus === 'ACCEPTED') {
+            // For ACCEPTED status, emit on special channel
+            io.to(`trip-${tripId}`).emit(`tripAccepted:${tripId}`, tripData);
+            io.emit('tripAccepted', { tripId, trip: tripData });
+          }
+          
+          // 5. Also update using the standard trip update method for redundancy
+          if (tripData) {
+            this.emitTripUpdate(tripId, tripData);
+          }
+          
+          return true;
+        } catch (error) {
+          console.error('Error in emitTripStatusChanged:', error);
+          return false;
+        }
+      },
       
       emitTripCancelled: function(tripId, userId, providerId) {
         try {

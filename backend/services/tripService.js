@@ -85,29 +85,94 @@ const createTripRequest = async (
  * @returns {Promise<Array>} Trips
  */
 const getTrips = async (id, isProvider = false, statusFilter = null) => {
-  let query = {};
-  
-  // Set up query based on user or provider
-  if (isProvider) {
-    query.providerId = id;
-  } else {
-    query.userId = id;
-  }
-  
-  // Add status filter if provided
-  if (statusFilter && Array.isArray(statusFilter)) {
-    query.status = { $in: statusFilter };
-  }
-  
-  // Query trips with populated ambulance and provider
-  return await Trip.find(query)
-    .sort({ requestTime: -1 })
-    .populate({
-      path: 'ambulanceId',
-      populate: {
-        path: 'providerId'
+  try {
+    const mongoose = require('mongoose');
+    let query = {};
+    
+    console.log('getTrips called with:', { id, isProvider, statusFilter });
+    
+    if (statusFilter && Array.isArray(statusFilter)) {
+      query.status = { $in: statusFilter };
+    }
+    
+    if (isProvider) {
+      // Try to convert the ID to an ObjectId
+      let objectId;
+      try {
+        objectId = new mongoose.Types.ObjectId(id);
+      } catch (err) {
+        console.error('Error converting to ObjectId:', err);
+        // If we can't convert to ObjectId, use the string directly
+        objectId = id;
       }
-    });
+      
+      console.log('Provider ID for query:', { original: id, converted: objectId.toString() });
+      
+      // Create a more flexible query that will match trips in multiple ways
+      const providerQuery = {
+        $or: [
+          // Match on direct providerId as an ObjectId
+          { providerId: objectId },
+          // Match on providerId._id
+          { 'providerId._id': objectId },
+          // Match on providerId._id as a string
+          { 'providerId._id': objectId.toString() },
+          // Match on providerId as a string
+          { providerId: objectId.toString() },
+          // Match on providerId.firebaseId
+          { 'providerId.firebaseId': req.userId }
+        ]
+      };
+      
+      console.log('Provider trip query:', JSON.stringify(providerQuery));
+      
+      // For REQUESTED status, also include trips for this provider's ambulances
+      if (statusFilter && statusFilter.includes('REQUESTED')) {
+        // Find ambulances belonging to this provider
+        const ambulances = await Ambulance.find({ 
+          $or: [
+            { providerId: objectId },
+            { 'providerId._id': objectId },
+            { 'providerId._id': objectId.toString() },
+            { providerId: objectId.toString() }
+          ]
+        }).select('_id');
+        
+        console.log(`Found ${ambulances.length} ambulances for provider`);
+        
+        const ambulanceIds = ambulances.map(a => a._id);
+        
+        if (ambulanceIds.length > 0) {
+          // If we found ambulances, extend the $or query to include them
+          providerQuery.$or.push({ ambulanceId: { $in: ambulanceIds } });
+        }
+      }
+      
+      // Merge the provider query with our existing status filter
+      query = { ...query, ...providerQuery };
+    } else {
+      // User (patient) side
+      query.userId = id;
+    }
+    
+    console.log('Final trips query:', JSON.stringify(query));
+    
+    // Find trips that match our query
+    const trips = await Trip.find(query)
+      .sort({ requestTime: -1 })
+      .populate({
+        path: 'ambulanceId',
+        populate: {
+          path: 'providerId'
+        }
+      });
+    
+    console.log(`Found ${trips.length} trips matching query`);
+    return trips;
+  } catch (error) {
+    console.error('Error in getTrips service:', error);
+    throw error;
+  }
 };
 
 /**

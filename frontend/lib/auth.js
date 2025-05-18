@@ -200,6 +200,13 @@ const providerLogin = async (email, password) => {
     const user = userCredential.user;
     console.log('Firebase auth successful for:', user.uid);
     
+    try {
+      const token = await user.getIdToken();
+      localStorage.setItem('authToken', token);
+      console.log('Stored auth token in localStorage');
+    } catch (tokenError) {
+      console.warn('Failed to store auth token:', tokenError);
+    }
     // Check for development mode - this helps during testing
     const isDevelopment = process.env.NODE_ENV === 'development';
     
@@ -241,30 +248,53 @@ const providerLogin = async (email, password) => {
         return userData;
       } 
       
-      // Development mode fallback - ONLY USE DURING DEVELOPMENT
-      if (isDevelopment) {
-        console.warn('DEVELOPMENT MODE: Creating temporary provider profile');
+    // Development mode fallback - ONLY USE DURING DEVELOPMENT
+    if (isDevelopment) {
+      console.warn('DEVELOPMENT MODE: Handling provider without profile');
+      
+      // Check if we have a stored mapping for this email
+      let tempProviderId;
+      
+      try {
+        // Try to get stored provider mappings
+        const storedMappings = JSON.parse(localStorage.getItem('devProviderMappings') || '{}');
         
-        // Create mock provider data for development
-        const tempProviderId = 'dev-provider-' + user.uid.substring(0, 5);
-        
-        const userData = {
-          uid: user.uid,
-          email: user.email,
-          displayName: user.displayName || email.split('@')[0],
-          phoneNumber: user.phoneNumber || '',
-          providerId: tempProviderId
-        };
-        
-        // Update state and storage
-        setUser(userData);
-        setUserRole('provider');
-        localStorage.setItem('user', JSON.stringify(userData));
-        localStorage.setItem('userRole', 'provider');
-        
-        console.log('DEV MODE: Created temporary provider profile:', userData);
-        return userData;
+        if (storedMappings[email.toLowerCase()]) {
+          // Use stored mapping if it exists
+          tempProviderId = storedMappings[email.toLowerCase()];
+          console.log(`Using stored provider ID for ${email}: ${tempProviderId}`);
+        } else {
+          // Default to main test provider ID
+          tempProviderId = '682665c66482acd3263499b2';
+          
+          // Store this mapping for next time
+          storedMappings[email.toLowerCase()] = tempProviderId;
+          localStorage.setItem('devProviderMappings', JSON.stringify(storedMappings));
+          
+          console.log(`Assigned default provider ID for ${email}: ${tempProviderId}`);
+        }
+      } catch (e) {
+        console.error('Error handling development provider mappings:', e);
+        tempProviderId = '682665c66482acd3263499b2'; // Fallback
       }
+      
+      const userData = {
+        uid: user.uid,
+        email: user.email,
+        displayName: user.displayName || email.split('@')[0],
+        phoneNumber: user.phoneNumber || '',
+        providerId: tempProviderId
+      };
+      
+      // Update state and storage
+      setUser(userData);
+      setUserRole('provider');
+      localStorage.setItem('user', JSON.stringify(userData));
+      localStorage.setItem('userRole', 'provider');
+      
+      console.log('DEV MODE: Created provider profile with ID:', tempProviderId);
+      return userData;
+    }
       
       throw new Error('Provider profile not found or incomplete');
       

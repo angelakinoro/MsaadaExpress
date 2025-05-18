@@ -16,23 +16,22 @@ const app = express();
 
 const server = http.createServer(app);
 
-// Middleware for CORS - apply before defining routes
 app.use(cors({
-  origin: true,
+  origin: ['http://localhost:3000', 'http://127.0.0.1:3000'], // Add your client origins explicitly
   methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
   credentials: true,
   allowedHeaders: ["Content-Type", "Authorization"]
 }));
 
-// Initialize Socket.IO with improved configuration
+// Also update the Socket.io CORS to match
 const io = new Server(server, {
   cors: {
-    origin: true, 
+    origin: ['http://localhost:3000', 'http://127.0.0.1:3000'], // Explicit origins
     methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     credentials: true,
     allowedHeaders: ["Content-Type", "Authorization"]
   },
-  transports: ['polling', 'websocket'],  
+  transports: ['polling', 'websocket'],
   pingTimeout: 60000,  
   pingInterval: 25000,
   upgradeTimeout: 30000,

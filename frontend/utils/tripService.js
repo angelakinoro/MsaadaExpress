@@ -1,6 +1,6 @@
 'use client';
 
-import { get, post, put, fetchWithAuth } from './api';
+import { post, get, put } from '@/utils/api';
 import { isFallbackMode } from './socketService';
 
 /**
@@ -10,9 +10,25 @@ import { isFallbackMode } from './socketService';
  */
 export const getTrips = async (statusFilter = '') => {
   try {
-    const endpoint = statusFilter 
+    // Get providerId from localStorage or user
+    let providerId = null;
+    try {
+      const userData = JSON.parse(localStorage.getItem('user') || '{}');
+      providerId = userData.providerId;
+    } catch (e) {
+      console.warn('Error getting provider ID from localStorage:', e);
+    }
+    
+    // Build the endpoint
+    let endpoint = statusFilter
       ? `/trips?status=${encodeURIComponent(statusFilter)}`
       : '/trips';
+    
+    // Add providerId as explicit query param in development mode
+    if (providerId && process.env.NODE_ENV === 'development') {
+      endpoint += `${endpoint.includes('?') ? '&' : '?'}providerId=${providerId}`;
+      console.log('Added explicit providerId to query:', endpoint);
+    }
     
     return await get(endpoint);
   } catch (error) {
@@ -102,7 +118,6 @@ export const createTrip = async (tripData) => {
         
         // Try to get existing trips first to prevent duplicates
         try {
-          const { get } = await import('./api');
           const recentTrips = await get('/trips?status=REQUESTED&limit=1');
           
           if (Array.isArray(recentTrips) && recentTrips.length > 0) {
@@ -122,7 +137,6 @@ export const createTrip = async (tripData) => {
         // The actual API call
         let response;
         try {
-          const { post } = await import('./api');
           response = await post('/trips', tripData);
         } catch (postError) {
           console.error(`Error in POST request (attempt ${attempts}):`, postError);
@@ -268,6 +282,8 @@ export const updateTripStatus = async (id, status, additionalData = {}) => {
     throw error;
   }
 };
+
+
 
 /**
  * Cancel a trip
@@ -574,5 +590,42 @@ export const pollForNewTrips = async (providerId, callback) => {
   } catch (error) {
     console.error('Error polling for new trips:', error);
     return false;
+  }
+};
+
+
+/**
+ * Force a pull refresh of trip status directly in the UI
+ * @param {string} tripId - Trip ID
+ * @returns {Promise<Object>} Updated trip or null if failed
+ */
+
+export const forcePullTripStatus = async (tripId) => {
+  if (!tripId) return null;
+  
+  console.log(`🔄 Force pull refresh for trip ${tripId}`);
+  
+  try {
+    // Use direct fetch with no-cache headers to bypass any caching
+    const response = await fetch(`/api/trips/${tripId}?_t=${Date.now()}`, {
+      method: 'GET',
+      headers: {
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0'
+      }
+    });
+    
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    
+    const tripData = await response.json();
+    console.log(`✅ Force pull successful, status: ${tripData.status}`);
+    
+    return tripData;
+  } catch (error) {
+    console.error('❌ Force pull failed:', error);
+    return null;
   }
 };

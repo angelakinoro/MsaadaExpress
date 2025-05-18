@@ -29,7 +29,6 @@ export default function FindAmbulancePage() {
   // Get all auth-related values at the top level
   const { user, userRole, loading: authLoading } = useAuth();
 
-/// Replace the provider redirect useEffect
 useEffect(() => {
   console.log('FindAmbulancePage - Auth state check:', { 
     userRole, 
@@ -246,11 +245,6 @@ useEffect(() => {
         tripStatusUnsubscribe = await subscribeTripUpdates(tripId, (updatedTrip) => {
           console.log('Trip update received in FindAmbulancePage:', updatedTrip);
           
-          // You could update some UI state here based on the trip update
-          // For example, showing modal or updating a status indicator
-          
-          // If trip status changes, refresh ambulances list
-          // This is important because the availability might have changed
           if (location) {
             console.log('Refreshing ambulances after trip update');
             refreshNearbyAmbulances(location);
@@ -272,6 +266,48 @@ useEffect(() => {
       }
     };
   }, [tripId, location, userRole]);
+
+useEffect(() => {
+  // This will hold our unsubscribe function
+  let tripSubscriptionCleanup = () => {};
+  
+  // Set up the subscription if we have a tripId
+  if (tripId) {
+    console.log('Setting up trip subscription from useEffect for trip:', tripId);
+    
+    // Create the subscription
+    const setupSubscription = async () => {
+      try {
+        const unsubscribe = await subscribeTripUpdates(tripId, (updatedTrip) => {
+          console.log('Trip update received from useEffect subscription:', updatedTrip);
+          
+          // Update any UI as needed
+          // This might duplicate the subscription in onTripCreated, but provides a fallback
+          
+          // Refresh ambulances when status changes
+          if (updatedTrip && updatedTrip.status && location) {
+            refreshNearbyAmbulances(location);
+          }
+        });
+        
+        // Store the unsubscribe function
+        tripSubscriptionCleanup = unsubscribe;
+      } catch (err) {
+        console.error('Error setting up trip subscription in useEffect:', err);
+      }
+    };
+    
+    setupSubscription();
+  }
+  
+  // Return cleanup function
+  return () => {
+    console.log('Cleaning up trip subscription from useEffect');
+    if (tripSubscriptionCleanup) {
+      tripSubscriptionCleanup();
+    }
+  };
+}, [tripId, location]);
 
   // Load Leaflet library
   useEffect(() => {
@@ -477,8 +513,8 @@ useEffect(() => {
             // Customize popup with ambulance info
             const ambulanceName = ambulance.name || 'Ambulance';
             const providerName = ambulance.providerId?.name || 'Provider';
-            const distance = ambulance.distance || 'Unknown distance';
-            const eta = ambulance.eta || 'Unknown ETA';
+            const distance = ambulance.distance || '';
+            const eta = ambulance.eta || '';
             const ambulanceType = ambulance.type || 'Standard';
             
             marker.bindPopup(`

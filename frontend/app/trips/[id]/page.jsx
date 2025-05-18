@@ -1,4 +1,3 @@
-// frontend/app/trips/[id]/page.jsx
 'use client';
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';

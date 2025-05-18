@@ -16,10 +16,74 @@ const getTrips = asyncHandler(async (req, res) => {
   try {
     // Check if user is a provider
     const isProvider = req.provider ? true : false;
-    const id = isProvider ? req.provider._id : req.userId;
+    
+    // Log the entire request for debugging
+    console.log('Request headers:', req.headers);
+    console.log('Request user:', req.user);
+    console.log('Request provider:', req.provider);
+    
+    // Get ID based on user type
+    let id;
+    if (isProvider) {
+      // If this is a provider, use their MongoDB ObjectId
+      id = req.provider._id;
+      
+      // Convert to string for logging (optional)
+      console.log('Provider ID:', id.toString());
+    } else {
+      // For patients, use Firebase UID
+      id = req.userId;
+      console.log('User ID:', id);
+    }
+    
+    // Get status filter from query parameter
+    let statusFilter = null;
+    if (req.query.status) {
+      statusFilter = req.query.status.split(',');
+      console.log('Status filter:', statusFilter);
+    }
+    
+    // IMPORTANT: Is there a providerId in the query params? 
+    if (req.query.providerId) {
+      console.log('Provider ID from query params:', req.query.providerId);
+      
+      // direct MongoDB query
+      try {
+        const directQuery = {
+          $or: [
+            { 'providerId': req.query.providerId },
+            { 'providerId._id': req.query.providerId }
+          ]
+        };
+        
+        if (statusFilter) {
+          directQuery.status = { $in: statusFilter };
+        }
+        
+        console.log('Direct query:', JSON.stringify(directQuery));
+        
+        const directTrips = await Trip.find(directQuery)
+          .populate({
+            path: 'ambulanceId',
+            populate: {
+              path: 'providerId'
+            }
+          });
+        
+        console.log(`Found ${directTrips.length} trips with direct query`);
+        
+        // If we found trips with direct query, return those
+        if (directTrips.length > 0) {
+          return res.json(directTrips);
+        }
+      } catch (e) {
+        console.error('Error in direct query:', e);
+      }
+    }
     
     // Get trips from service
-    const trips = await tripService.getTrips(id, isProvider);
+    const trips = await tripService.getTrips(id, isProvider, statusFilter);
+    console.log(`Found ${trips.length} trips`);
     
     res.json(trips);
   } catch (error) {
@@ -367,13 +431,8 @@ const updateTripStatus = asyncHandler(async (req, res) => {
         socketService.emit('globalTripUpdate', updatedTrip);
         
         // Emit on the tripStatusChanged channel which both sides listen to
-        socketService.emit('tripStatusChanged', {
-          tripId: id,
-          oldStatus: previousStatus,
-          newStatus: status,
-          trip: updatedTrip.toObject(),
-          timestamp: new Date().toISOString()
-        });
+      socketService.emitTripStatusChanged(id, previousStatus, status, updatedTrip.toObject());
+
       } catch (firstEmitError) {
         console.error('First emission error:', firstEmitError);
       }

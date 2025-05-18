@@ -5,7 +5,13 @@ import { io } from 'socket.io-client';
 // Create a single instance of the socket for the entire application
 let socket = null;
 let socketFailedButAppCanProceed = false;
-const MAX_RECONNECT_ATTEMPTS = 2; // Limit reconnection attempts
+const MAX_RECONNECT_ATTEMPTS = 3;
+
+const getBackendUrl = () => {
+  return 'http://localhost:5000';
+};
+
+
 
 /**
  * Helper function to safely call socket methods
@@ -69,15 +75,15 @@ export const initializeSocket = () => {
     
     // Choose optimal socket URL based on environment
     // Use full URL instead of relative path for more reliable connections
-    const socketUrl = typeof window !== 'undefined' ? window.location.origin : '/';
+    const socketUrl = getBackendUrl();  
     console.log('Initializing socket connection to:', socketUrl);
     
     try {
       // Create socket with more reliable configuration
       socket = io(socketUrl, {
         path: '/socket.io',
-        transports: ['polling' /*'websocket'*/], // Try polling first, then upgrade
-        reconnectionAttempts: 1, // Reduced from MAX_RECONNECT_ATTEMPTS to 1
+        transports: ['polling','websocket'], // Try polling first, then upgrade
+        reconnectionAttempts: 3, 
         reconnectionDelay: 1000,
         timeout: 10000, // Reduced from 20000 to 10000
         autoConnect: true,
@@ -211,6 +217,8 @@ export const initializeSocket = () => {
  * Fallback connection using polling only (no websocket)
  * This is more reliable when there are issues with websocket transport
  */
+// In your socketService.js file, find the tryPollingOnlyConnection function
+
 const tryPollingOnlyConnection = () => {
   try {
     console.log('Attempting fallback socket connection with polling only...');
@@ -231,16 +239,17 @@ const tryPollingOnlyConnection = () => {
     }
     
     // Use full URL instead of relative path
-    const socketUrl = typeof window !== 'undefined' ? window.location.origin : '/';
+    const socketUrl = 'http://localhost:5000';
+    console.log('Initializing socket connection to:', socketUrl);
     
     // Create new socket with polling only
-    const pollingSocket = io(socketUrl, {
+    const pollingSocket = io(socketUrl, { 
       path: '/socket.io',
       transports: ['polling'], // Polling only - no websocket
-      reconnectionAttempts: 1, // Reduced from 2 to 1
-      timeout: 10000, // Reduced from 20000 to 10000
+      reconnectionAttempts: 1,
+      timeout: 10000,
       forceNew: true,
-      reconnection: false // Disable automatic reconnection
+      reconnection: false
     });
     
     if (!pollingSocket) {
@@ -251,20 +260,19 @@ const tryPollingOnlyConnection = () => {
     
     pollingSocket.on('connect', () => {
       console.log('Fallback polling socket connected:', pollingSocket.id);
-      socket = pollingSocket;
+      socket = pollingSocket;    // ← Save it to the main socket variable
       socketFailedButAppCanProceed = false;
     });
     
     pollingSocket.on('connect_error', (error) => {
       console.error('Fallback polling socket error:', error.message);
-      // Immediately go to fallback mode without retrying
       socketFailedButAppCanProceed = true;
       safeSetItem('socketConnectionFailed', 'true');
       safeSetItem('socketFailedTime', new Date().getTime().toString());
       
       // Disconnect the socket to prevent further errors
       try {
-        pollingSocket.disconnect();
+        pollingSocket.disconnect();    // ← Use pollingSocket here
       } catch (e) {
         console.warn('Error disconnecting polling socket after error:', e);
       }
@@ -272,10 +280,10 @@ const tryPollingOnlyConnection = () => {
     
     // Auto-disconnect fallback attempt if it doesn't connect quickly
     setTimeout(() => {
-      if (pollingSocket && !pollingSocket.connected) {
+      if (pollingSocket && !pollingSocket.connected) {    // ← Use pollingSocket here
         console.log('Fallback polling socket timed out, disconnecting');
         try {
-          pollingSocket.disconnect();
+          pollingSocket.disconnect();    // ← Use pollingSocket here
         } catch (e) {
           console.warn('Error disconnecting polling socket:', e);
         }
@@ -284,7 +292,7 @@ const tryPollingOnlyConnection = () => {
         socketFailedButAppCanProceed = true;
         safeSetItem('socketConnectionFailed', 'true');
       }
-    }, 5000); // Reduced from 10000 to 5000
+    }, 5000);
     
   } catch (err) {
     console.error('Error in polling fallback:', err);
@@ -1197,6 +1205,7 @@ export const updateAmbulanceLocation = (ambulanceId, location) => {
     return false;
   }
 };
+
 
 export const unsubscribeFromAllEvents = () => {
   const socketInstance = initializeSocket();

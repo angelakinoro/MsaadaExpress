@@ -1,10 +1,19 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
-import { FiCheckCircle, FiAlertCircle, FiClock, FiMapPin, FiPhone, FiX } from 'react-icons/fi';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { FiCheckCircle, FiAlertCircle, FiClock, FiMapPin, FiPhone, FiX, FiRefreshCw } from 'react-icons/fi';
 import { GiAmbulance } from 'react-icons/gi';
-import { createTrip, cancelTrip, forceRefreshTripStatus, cleanupTripStorage, getTripById, monitorForAcceptance } from '@/utils/tripService';
-import { subscribeTripUpdates, subscribeAmbulanceLocation, isFallbackMode, authenticateUser } from '@/utils/socketService';
+import { 
+  createTrip, 
+  cancelTrip, 
+  cleanupTripStorage, 
+  getTripById 
+} from '@/utils/tripService';
+import { 
+  subscribeAmbulanceLocation, 
+  authenticateUser, 
+  getSocket 
+} from '@/utils/socketService';
 import { useAuth } from '@/lib/auth';
 
 // Create a singleton flag to prevent multiple trip creation during the same session
@@ -17,22 +26,292 @@ const TripRequestModal = ({
   selectedAmbulance, 
   patientDetails,
   emergencyDetails = '',
-  onTripCreated // New callback prop to notify parent when trip is created
+  onTripCreated
 }) => {
-  const [step, setStep] = useState('requesting'); // requesting, searching, found, accepted, arrived, pickedUp, atHospital, completed, error
+  // Core state
+  const [step, setStep] = useState('requesting'); // requesting, searching, found, accepted, arrived, pickedup, athospital, completed, error
   const [trip, setTrip] = useState(null);
   const [error, setError] = useState(null);
   const [ambulanceLocation, setAmbulanceLocation] = useState(null);
   const [timeElapsed, setTimeElapsed] = useState(0);
   const [tripTimer, setTripTimer] = useState(null);
   const [cancelingTrip, setCancelingTrip] = useState(false);
-  const [subscriptionsSet, setSubscriptionsSet] = useState(false);
   const [requestInProgress, setRequestInProgress] = useState(false);
+  
+  // Status monitoring state
+  const [lastRefresh, setLastRefresh] = useState(new Date());
+  const [refreshing, setRefreshing] = useState(false);
+  const [socketConnected, setSocketConnected] = useState(false);
+  
+  // References
   const modalRef = useRef(null);
+  const prevStatusRef = useRef(null);
+  const currentTripIdRef = useRef(null);
   const { user } = useAuth();
 
-  // Add the missing setupAmbulanceTracking function
-  const setupAmbulanceTracking = async (ambulanceId) => {
+  // Update trip ID reference whenever trip changes
+  useEffect(() => {
+    if (trip && trip._id) {
+      currentTripIdRef.current = trip._id;
+      // Also update status reference
+      prevStatusRef.current = trip.status;
+    }
+  }, [trip]);
+
+  // Function to show status notifications
+  const showStatusNotification = (newStatus, type = 'success') => {
+    if (!newStatus || newStatus === prevStatusRef.current) return;
+    
+    console.log(`Showing notification for status: ${newStatus}`);
+    
+    // Create notification element
+    const notificationEl = document.createElement('div');
+    notificationEl.className = `fixed top-4 right-4 px-4 py-3 rounded z-50 flex items-center ${
+      type === 'success' ? 'bg-green-100 border border-green-400 text-green-700' : 'bg-red-100 border border-red-400 text-red-700'
+    }`;
+    
+    // Status-specific messages
+    const statusMessages = {
+      'ACCEPTED': 'Ambulance is on the way',
+      'ARRIVED': 'Ambulance has arrived at your location',
+      'PICKED_UP': 'Patient has been picked up',
+      'AT_HOSPITAL': 'Arrived at hospital',
+      'COMPLETED': 'Trip completed successfully',
+      'CANCELLED': 'Trip has been cancelled'}
+    
+
+    
+    const message = statusMessages[newStatus] || `Status updated to: ${newStatus}`;
+    
+    // Icon based on type
+    const iconSvg = type === 'success' 
+      ? '<svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>'
+      : '<svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>';
+    
+    notificationEl.innerHTML = `
+      ${iconSvg}
+      <p>${message}</p>
+    `;
+    
+    // Add to body
+    document.body.appendChild(notificationEl);
+    
+    // Remove after delay
+    setTimeout(() => {
+      document.body.removeChild(notificationEl);
+    }, 5000);
+    
+    // Update prevStatusRef
+    prevStatusRef.current = newStatus;
+  };
+
+// Improved directFetchTripStatus function with better error handling and auth token
+const directFetchTripStatus = useCallback(async (tripId) => {
+  if (!tripId) {
+    console.warn('Cannot fetch trip status: No trip ID provided');
+    return null;
+  }
+  
+  try {
+    console.log(`Direct fetching trip ${tripId} status...`);
+    // Add cache-busting timestamp and random param
+    const timestamp = Date.now();
+    const random = Math.random().toString(36).substring(2, 8);
+    
+    // Get token from localStorage or auth context
+    let token = null;
+    if (user && user.getIdToken) {
+      try {
+        token = await user.getIdToken();
+      } catch (e) {
+        console.error('Error getting ID token from user object:', e);
+      }
+    }
+    
+    // If not available from user object, try localStorage
+    if (!token) {
+      token = localStorage.getItem('authToken');
+      if (!token) {
+        console.warn('No authentication token available for API request');
+      }
+    }
+    
+    // Set up headers
+    const headers = {
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'Pragma': 'no-cache'
+    };
+    
+    // Add auth token if available
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+    
+    // Using the status/refresh endpoint for the most direct access
+    const response = await fetch(`/api/trips/${tripId}/status/refresh?_t=${timestamp}&_r=${random}`, {
+      headers
+    });
+    
+    // Log the response status for debugging
+    console.log(`Status refresh response: ${response.status} ${response.statusText}`);
+    
+    if (!response.ok) {
+      // Try to get more details about the error
+      try {
+        const errorData = await response.json();
+        console.error(`Error response from direct fetch: ${response.status}`, errorData);
+      } catch (parseError) {
+        console.error(`Error response from direct fetch: ${response.status}. Could not parse error details.`);
+      }
+      
+      // Fall back to regular trip endpoint if refresh endpoint fails
+      console.log('Falling back to regular trip endpoint...');
+      
+      const fallbackResponse = await fetch(`/api/trips/${tripId}?_t=${timestamp}`, {
+        headers
+      });
+      
+      if (!fallbackResponse.ok) {
+        console.error(`Fallback also failed: ${fallbackResponse.status}`);
+        return null;
+      }
+      
+      const fallbackData = await fallbackResponse.json();
+      console.log('Fallback successful:', fallbackData);
+      return fallbackData;
+    }
+    
+    const data = await response.json();
+    console.log(`Direct fetch successful, status: ${data.status}`);
+    
+    return data;
+  } catch (error) {
+    console.error('Error in direct fetch:', error);
+    return null;
+  }
+}, [user]);
+
+  // Updated updateTripStatus function for consistent UI updates
+  const updateTripStatus = useCallback((updatedTrip, source) => {
+    if (!updatedTrip) {
+      console.warn(`Received null trip data in updateTripStatus from ${source}`);
+      return;
+    }
+    
+    console.log(`Trip update from ${source}:`, updatedTrip);
+    
+    // Check for status change - compare with current trip state
+    const statusChanged = !trip || updatedTrip.status !== trip.status;
+    
+    if (statusChanged) {
+      console.log(`Status changed: ${trip?.status || 'none'} → ${updatedTrip.status}`);
+    }
+    
+    // Always update trip state
+    setTrip(updatedTrip);
+    
+    // Update UI step if status changed - map server status to UI step
+    if (statusChanged) {
+      // Map status to appropriate step
+      let newStep = updatedTrip.status.toLowerCase();
+      
+      // Handle specific mappings
+      if (updatedTrip.status === 'REQUESTED') {
+        newStep = 'found';
+      } else if (updatedTrip.status === 'PICKED_UP') {
+        newStep = 'pickedup';
+      } else if (updatedTrip.status === 'AT_HOSPITAL') {
+        newStep = 'athospital';
+      }
+      
+      console.log(`Setting step: ${step} → ${newStep}`);
+      setStep(newStep);
+      
+      // Show notification
+      showStatusNotification(updatedTrip.status);
+    }
+    
+    // Update last refresh time
+    setLastRefresh(new Date());
+  }, [trip, step, showStatusNotification]);
+
+  // Improved handleTripUpdate function for socket events
+  const handleTripUpdate = useCallback((source, data) => {
+    console.log(`Socket event from ${source}:`, data);
+    
+    // Safely extract trip data based on event format - handle all possible formats
+    let updatedTrip = null;
+    let newStatus = null;
+    let tripId = null;
+    
+    // Handle different data formats from various socket events
+    if (data && data.trip && data.trip._id) {
+      // Format: { trip: {...}, newStatus: '...' }
+      updatedTrip = data.trip;
+      newStatus = data.newStatus || data.trip.status;
+      tripId = data.trip._id;
+    } else if (data && data._id) {
+      // Format: the entire trip object directly
+      updatedTrip = data;
+      newStatus = data.status;
+      tripId = data._id;
+    } else if (data && data.tripId && data.status) {
+      // Format: { tripId: '...', status: '...' }
+      newStatus = data.status;
+      tripId = data.tripId;
+    } else if (data && data.type === 'TRIP_STATUS_UPDATE') {
+      // Notification format
+      newStatus = data.status || data.newStatus;
+      tripId = data.tripId || (data.trip && data.trip._id);
+    }
+    
+    console.log('Extracted data:', { 
+      tripId: tripId ? tripId.substring(0, 8) + '...' : 'no',
+      updatedTrip: updatedTrip ? 'yes' : 'no',
+      newStatus
+    });
+    
+    // Verify this update is for our current trip
+    if (tripId && currentTripIdRef.current && tripId !== currentTripIdRef.current) {
+      console.warn(`Ignoring update for different trip (${tripId} vs ${currentTripIdRef.current})`);
+      return;
+    }
+    
+    // Skip if no useful data
+    if (!newStatus && !updatedTrip) {
+      console.warn('No useful information in update');
+      return;
+    }
+    
+    // If we only have status but no trip data, fetch the full trip
+    if (newStatus && !updatedTrip && trip && trip._id) {
+      console.log(`Fetching full trip data for status update to ${newStatus}`);
+      // Don't wait for this to complete - we'll update UI when fetch returns
+      directFetchTripStatus(trip._id).then(fullTrip => {
+        if (fullTrip) {
+          updateTripStatus(fullTrip, `${source}-with-fetch`);
+        } else {
+          // If fetch fails but we have status, update just the status
+          const updatedTripWithStatus = { ...trip, status: newStatus };
+          updateTripStatus(updatedTripWithStatus, `${source}-status-only`);
+        }
+      }).catch(err => {
+        console.error('Error fetching trip details:', err);
+        // Still update with what we know
+        const updatedTripWithStatus = { ...trip, status: newStatus };
+        updateTripStatus(updatedTripWithStatus, `${source}-status-fallback`);
+      });
+      return;
+    }
+    
+    // If we have a trip object, update with it
+    if (updatedTrip) {
+      updateTripStatus(updatedTrip, source);
+    }
+  }, [trip, directFetchTripStatus, updateTripStatus]);
+
+  // Function to set up ambulance tracking
+  const setupAmbulanceTracking = useCallback(async (ambulanceId) => {
     if (!ambulanceId) {
       console.warn('No ambulance ID provided for tracking setup');
       return;
@@ -88,9 +367,9 @@ const TripRequestModal = ({
       
       return () => clearInterval(pollingInterval);
     }
-  };
+  }, [trip, tripTimer]);
 
-  // Ensure user is authenticated with socket service
+  // Authenticate with socket when user is available
   useEffect(() => {
     if (user && user.uid) {
       // Authenticate user with socket service to receive updates
@@ -99,10 +378,197 @@ const TripRequestModal = ({
     }
   }, [user]);
 
-  // Handle trip request when modal opens
+  // Socket connection check
+  useEffect(() => {
+    const socket = getSocket();
+    if (socket) {
+      setSocketConnected(socket.connected);
+      
+      // Update connection status when it changes
+      const handleConnect = () => {
+        console.log('Socket connected');
+        setSocketConnected(true);
+      };
+      
+      const handleDisconnect = () => {
+        console.log('Socket disconnected');
+        setSocketConnected(false);
+      };
+      
+      socket.on('connect', handleConnect);
+      socket.on('disconnect', handleDisconnect);
+      
+      // Initial status
+      if (socket.connected) {
+        handleConnect();
+      }
+      
+      return () => {
+        socket.off('connect', handleConnect);
+        socket.off('disconnect', handleDisconnect);
+      };
+    }
+  }, []);
+
+  // Direct polling for trip status - our most reliable method
+  useEffect(() => {
+    // Skip if no trip
+    if (!trip || !trip._id) return;
+    
+    console.log('Setting up direct polling for trip:', trip._id);
+    
+    // Store trip ID for cleanup
+    const tripId = trip._id;
+    
+    // Function to check status
+    const checkStatus = async () => {
+      try {
+        const updatedTrip = await directFetchTripStatus(tripId);
+        
+        if (!updatedTrip) {
+          console.warn('No trip data returned from status check');
+          return;
+        }
+        
+        // Only proceed if trip is still the same
+        if (currentTripIdRef.current !== tripId) {
+          console.warn('Trip changed during polling, discarding results');
+          return;
+        }
+        
+        // Update if status changed or if it's been more than 10 seconds since last update
+        const timeSinceLastRefresh = new Date() - lastRefresh;
+        if (updatedTrip.status !== trip.status || timeSinceLastRefresh > 10000) {
+          console.log(`Updating from polling: ${updatedTrip.status}${
+            updatedTrip.status !== trip.status ? ' (status changed)' : ' (refresh)'
+          }`);
+          updateTripStatus(updatedTrip, 'HTTP-POLL');
+        } else {
+          // Still update last refresh time
+          setLastRefresh(new Date());
+        }
+      } catch (error) {
+        console.error('Error in polling:', error);
+      }
+    };
+    
+    // Check immediately
+    checkStatus();
+    
+    // Set up polling interval - check every 5 seconds
+    const intervalId = setInterval(checkStatus, 5000);
+    
+    // Cleanup
+    return () => {
+      console.log('Cleaning up polling for trip:', tripId);
+      clearInterval(intervalId);
+    };
+  }, [trip?._id, trip?.status, lastRefresh, directFetchTripStatus, updateTripStatus]);
+
+  // Setup ambulance tracking when trip is accepted
+  useEffect(() => {
+    let cleanup = null;
+    
+    // Start tracking when trip is accepted and has an ambulance ID
+    if (trip && ['ACCEPTED', 'ARRIVED', 'PICKED_UP', 'AT_HOSPITAL'].includes(trip.status) && 
+        trip.ambulanceId && trip.ambulanceId._id) {
+      
+      console.log('Starting ambulance tracking for:', trip.ambulanceId._id);
+      setupAmbulanceTracking(trip.ambulanceId._id).then(unsubscribe => {
+        cleanup = unsubscribe;
+      });
+    }
+    
+    // Cleanup tracking when component unmounts or trip changes
+    return () => {
+      if (cleanup && typeof cleanup === 'function') {
+        console.log('Cleaning up ambulance tracking');
+        cleanup();
+      }
+    };
+  }, [trip?.ambulanceId?._id, trip?.status, setupAmbulanceTracking]);
+
+  // Socket event listeners - consolidated to a single effect with clean dependencies
+  useEffect(() => {
+    // Skip if no trip
+    if (!trip || !trip._id) return;
+    
+    // Store the trip ID for cleanup and comparison
+    const tripId = trip._id;
+    currentTripIdRef.current = tripId;
+    
+    const socket = getSocket();
+    if (!socket) {
+      console.warn('No socket available for trip updates');
+      return;
+    }
+    
+    console.log('Setting up socket listeners for trip:', tripId);
+    
+    // Remove existing listeners first to prevent duplicates
+    socket.off(`tripUpdate:${tripId}`);
+    socket.off('tripStatusChanged');
+    socket.off('globalTripUpdate');
+    socket.off('tripUpdated');
+    socket.off('notification');
+    
+    // Set up event handlers for different socket events
+    const handleTripSpecificUpdate = (data) => {
+      if (tripId === currentTripIdRef.current) {
+        handleTripUpdate(`tripUpdate:${tripId}`, data);
+      }
+    };
+    
+    const handleStatusChange = (data) => {
+      const currentId = currentTripIdRef.current;
+      if (currentId && data && (data.tripId === currentId || (data.trip && data.trip._id === currentId))) {
+        handleTripUpdate('tripStatusChanged', data);
+      }
+    };
+    
+    const handleGlobalUpdate = (data) => {
+      if (data && data._id === currentTripIdRef.current) {
+        handleTripUpdate('globalTripUpdate', data);
+      }
+    };
+    
+    const handleTripUpdated = (data) => {
+      if (data && data._id === currentTripIdRef.current) {
+        handleTripUpdate('tripUpdated', data);
+      }
+    };
+    
+    const handleNotification = (data) => {
+      const currentId = currentTripIdRef.current;
+      if (data && data.type === 'TRIP_STATUS_UPDATE' && 
+          (data.tripId === currentId || (data.trip && data.trip._id === currentId))) {
+        handleTripUpdate('notification', data);
+      }
+    };
+    
+    // Set up listeners
+    socket.on(`tripUpdate:${tripId}`, handleTripSpecificUpdate);
+    socket.on('tripStatusChanged', handleStatusChange);
+    socket.on('globalTripUpdate', handleGlobalUpdate);
+    socket.on('tripUpdated', handleTripUpdated);
+    socket.on('notification', handleNotification);
+    
+    console.log('Socket listeners established successfully');
+    
+    // Cleaner cleanup function - more maintainable
+    return () => {
+      console.log('Cleaning up socket listeners for trip:', tripId);
+      socket.off(`tripUpdate:${tripId}`, handleTripSpecificUpdate);
+      socket.off('tripStatusChanged', handleStatusChange);
+      socket.off('globalTripUpdate', handleGlobalUpdate);
+      socket.off('tripUpdated', handleTripUpdated);
+      socket.off('notification', handleNotification);
+    };
+  }, [trip?._id, handleTripUpdate]);
+
+  // Handle trip creation when modal opens - more robust with additional error handling
   useEffect(() => {
     let mounted = true;
-    let statusCheckInterval;
     
     if (isOpen && step === 'requesting' && selectedAmbulance && userLocation && patientDetails && !requestInProgress && !tripCreationInProgress) {
       (async () => {
@@ -118,7 +584,7 @@ const TripRequestModal = ({
               if (timeSinceLastTrip < 30000) {
                 console.warn(`Preventing duplicate trip creation. Last trip ${lastTripId} was created ${timeSinceLastTrip}ms ago`);
                 
-                // Instead of just returning, try to fetch the existing trip and display it
+                // Try to fetch the existing trip and display it
                 if (mounted) {
                   setStep('searching');
                   try {
@@ -132,13 +598,19 @@ const TripRequestModal = ({
                         onTripCreated(existingTrip);
                       }
                       
-                      // Update step based on trip status
+                      // Update step based on trip status - more consistent mapping
                       if (existingTrip.status === 'REQUESTED') {
                         setStep('found');
-                        // Set up status checks for existing requested trip
-                        statusCheckInterval = await checkForAcceptedStatus(existingTrip._id);
-                      } else if (['ACCEPTED', 'ARRIVED', 'PICKED_UP', 'AT_HOSPITAL', 'COMPLETED'].includes(existingTrip.status)) {
-                        setStep(existingTrip.status.toLowerCase());
+                      } else if (existingTrip.status === 'ACCEPTED') {
+                        setStep('accepted');
+                      } else if (existingTrip.status === 'ARRIVED') {
+                        setStep('arrived');
+                      } else if (existingTrip.status === 'PICKED_UP') {
+                        setStep('pickedup');
+                      } else if (existingTrip.status === 'AT_HOSPITAL') {
+                        setStep('athospital');
+                      } else if (existingTrip.status === 'COMPLETED') {
+                        setStep('completed');
                       }
                       return; // Exit after setting up the existing trip
                     }
@@ -188,74 +660,37 @@ const TripRequestModal = ({
           
           console.log('Requesting trip with data:', JSON.stringify(tripData, null, 2));
           
+          // Create the trip with retries
           let createdTrip = null;
           let attemptCount = 0;
           const maxAttempts = 3;
           
-          // Use a retry loop with exponential backoff
           while (!createdTrip && attemptCount < maxAttempts) {
             try {
               attemptCount++;
               console.log(`Attempt ${attemptCount} to create trip`);
               
-              // Add a random delay to avoid multiple identical requests
-              const delay = 1000 + (attemptCount - 1) * 1000 + Math.random() * 500;
-              await new Promise(resolve => setTimeout(resolve, delay));
+              createdTrip = await createTrip(tripData);
+              console.log('Trip created successfully:', createdTrip);
               
-              try {
-                // Create the trip with more explicit error handling
-                createdTrip = await createTrip(tripData).catch(err => {
-                  console.error(`Error caught in trip creation attempt ${attemptCount}:`, err);
-                  throw err;
-                });
-                
-                console.log('Trip created successfully:', createdTrip);
-                
-                if (!mounted) return;
-                
-                // Extra validation to ensure we have a valid trip object
-                if (!createdTrip || typeof createdTrip !== 'object') {
-                  throw new Error('Server returned invalid trip data (not an object)');
-                }
-                
-                if (!createdTrip._id) {
-                  throw new Error('Server returned trip without ID');
-                }
-                
-                // Notify parent component about the created trip
-                if (onTripCreated && typeof onTripCreated === 'function') {
-                  onTripCreated(createdTrip);
-                }
-              } catch (apiError) {
-                console.error(`API error creating trip (attempt ${attemptCount}):`, apiError);
-                
-                // If this is our last attempt, handle the error
-                if (attemptCount >= maxAttempts) {
-                  throw apiError;
-                }
-                
-                // Otherwise, wait before trying again
-                const retryDelay = 1000 * attemptCount;
-                console.log(`Waiting ${retryDelay}ms before retry...`);
-                await new Promise(resolve => setTimeout(resolve, retryDelay));
+              // Validate result
+              if (!createdTrip || !createdTrip._id) {
+                throw new Error('Invalid response from server');
               }
-            } catch (retryError) {
-              console.error(`Error during trip creation attempt ${attemptCount}:`, retryError);
+            } catch (error) {
+              console.error(`Error in trip creation attempt ${attemptCount}:`, error);
               
-              // If this is our last attempt, handle the error
+              // On last attempt, re-throw
               if (attemptCount >= maxAttempts) {
-                if (mounted) {
-                  setStep('error');
-                  setError(retryError.message || 'Failed to request ambulance. Please try again.');
-                  setRequestInProgress(false);
-                  tripCreationInProgress = false;
-                }
-                throw retryError;
+                throw error;
               }
+              
+              // Wait before retrying
+              await new Promise(resolve => setTimeout(resolve, 1000 * attemptCount));
             }
           }
           
-          // If we've successfully created a trip
+          // If we successfully created a trip
           if (createdTrip && createdTrip._id) {
             // Store in session storage
             try {
@@ -265,31 +700,46 @@ const TripRequestModal = ({
               console.warn('Could not save trip to session storage:', storageErr);
             }
             
+            // Update state
             setTrip(createdTrip);
             
+            // Notify parent component
+            if (onTripCreated && typeof onTripCreated === 'function') {
+              onTripCreated(createdTrip);
+            }
+            
+            // Update step based on status - more consistent mapping
             if (createdTrip.status === 'REQUESTED') {
               setStep('found');
-              // Set up status checks for new requested trip
-              statusCheckInterval = await checkForAcceptedStatus(createdTrip._id);
-            } else if (['ACCEPTED', 'ARRIVED', 'PICKED_UP', 'AT_HOSPITAL', 'COMPLETED'].includes(createdTrip.status)) {
-              setStep(createdTrip.status.toLowerCase());
+            } else if (createdTrip.status === 'ACCEPTED') {
+              setStep('accepted'); 
+            } else if (createdTrip.status === 'ARRIVED') {
+              setStep('arrived');
+            } else if (createdTrip.status === 'PICKED_UP') {
+              setStep('pickedup');
+            } else if (createdTrip.status === 'AT_HOSPITAL') {
+              setStep('athospital');
+            } else if (createdTrip.status === 'COMPLETED') {
+              setStep('completed');
             }
           }
-        } catch (outerError) {
-          console.error('Outer error requesting trip:', outerError);
+        } catch (error) {
+          console.error('Error creating trip:', error);
           if (mounted) {
             setStep('error');
-            setError(outerError.message || 'Failed to request ambulance. Please try again.');
-            setRequestInProgress(false);
-            tripCreationInProgress = false;
+            setError(error.message || 'Failed to request ambulance. Please try again.');
           }
+        } finally {
+          if (mounted) {
+            setRequestInProgress(false);
+          }
+          tripCreationInProgress = false;
         }
       })();
     }
     
     return () => {
       mounted = false;
-      if (statusCheckInterval) clearInterval(statusCheckInterval);
     };
   }, [isOpen, selectedAmbulance, userLocation, patientDetails, emergencyDetails, requestInProgress, onTripCreated, step]);
 
@@ -302,227 +752,6 @@ const TripRequestModal = ({
     };
   }, [tripTimer]);
 
-  // Set up trip status monitoring
-  useEffect(() => {
-    let tripMonitorCleanup = null;
-    let socketUnsubscribe = null;
-    let ambulanceTrackingUnsubscribe = null;
-    let acceptedStatusDetected = false;
-    
-    // Set up monitoring when we have a trip ID
-    if (trip && trip._id) {
-      console.log('Setting up trip status monitoring for:', trip._id);
-      
-      // 1. Set up HTTP polling for critical transitions (more reliable)
-      tripMonitorCleanup = monitorForAcceptance(trip._id, (acceptedTrip) => {
-        console.log('Trip was accepted! Updating UI...', acceptedTrip);
-        acceptedStatusDetected = true;
-        
-        // Update UI
-        if (acceptedTrip) {
-          setTrip(acceptedTrip);
-          setStep('accepted');
-          showStatusNotification('Ambulance is on the way');
-          
-          // Try to set up ambulance tracking
-          if (acceptedTrip.ambulanceId) {
-            const ambulanceId = typeof acceptedTrip.ambulanceId === 'string' 
-              ? acceptedTrip.ambulanceId 
-              : acceptedTrip.ambulanceId._id;
-              
-            setupAmbulanceTracking(ambulanceId).then(unsubscribe => {
-              ambulanceTrackingUnsubscribe = unsubscribe;
-            }).catch(err => {
-              console.error('Error setting up ambulance tracking:', err);
-            });
-          }
-        }
-      });
-      
-      // 2. Also try using socket connection (less reliable but faster)
-      try {
-        socketUnsubscribe = subscribeTripUpdates(trip._id, (updatedTrip) => {
-          if (!updatedTrip) return;
-          
-          console.log('Socket trip update received:', updatedTrip);
-          
-          // Update the trip object - only if it has the expected fields
-          if (updatedTrip._id && updatedTrip.status) {
-            setTrip(updatedTrip);
-          }
-          
-          // Handle status specific transitions - with extra validation to prevent UI glitches
-          const newStatus = updatedTrip.status;
-          
-          if (newStatus === 'ACCEPTED' && step !== 'accepted') {
-            console.log('Trip was ACCEPTED, updating UI');
-            acceptedStatusDetected = true;
-            setStep('accepted');
-            showStatusNotification('Ambulance is on the way', 'success');
-            
-            // Set up ambulance tracking
-            if (updatedTrip.ambulanceId) {
-              const ambulanceId = typeof updatedTrip.ambulanceId === 'string' 
-                ? updatedTrip.ambulanceId 
-                : updatedTrip.ambulanceId._id;
-              
-              // Only set up tracking if not already set up
-              if (!ambulanceTrackingUnsubscribe) {
-                setupAmbulanceTracking(ambulanceId).then(unsubscribe => {
-                  ambulanceTrackingUnsubscribe = unsubscribe;
-                }).catch(err => {
-                  console.error('Error setting up ambulance tracking:', err);
-                });
-              }
-            }
-          } else if (newStatus === 'ARRIVED' && step !== 'arrived') {
-            console.log('Ambulance has ARRIVED, updating UI');
-            setStep('arrived');
-            showStatusNotification('Ambulance has arrived at your location', 'success');
-          } else if (newStatus === 'PICKED_UP' && step !== 'pickedUp') {
-            console.log('Patient PICKED UP, updating UI');
-            setStep('pickedUp');
-            showStatusNotification('Patient has been picked up', 'success');
-          } else if (newStatus === 'AT_HOSPITAL' && step !== 'atHospital') {
-            console.log('Ambulance AT HOSPITAL, updating UI');
-            setStep('atHospital');
-            showStatusNotification('Arrived at hospital', 'success');
-          } else if (newStatus === 'COMPLETED' && step !== 'completed') {
-            console.log('Trip COMPLETED, updating UI');
-            setStep('completed');
-            showStatusNotification('Trip completed', 'success');
-            
-            // Clean up trip storage for completed trips
-            setTimeout(() => {
-              cleanupTripStorage();
-            }, 2000);
-          } else if (newStatus === 'CANCELLED' && step !== 'cancelled') {
-            console.log('Trip CANCELLED, updating UI');
-            setStep('cancelled');
-            showStatusNotification('Trip cancelled', 'error');
-          }
-        });
-        
-        // Force a refresh call for initial status
-        const forceInitialRefresh = async () => {
-          try {
-            console.log('Forcing initial trip status refresh');
-            const refreshedTrip = await forceRefreshTripStatus(trip._id);
-            if (refreshedTrip && refreshedTrip.status) {
-              console.log('Got initial trip status:', refreshedTrip.status);
-              
-              // If trip was already accepted, make sure UI shows it
-              if (refreshedTrip.status === 'ACCEPTED' && step !== 'accepted') {
-                console.log('Trip is already ACCEPTED, updating UI');
-                setTrip(refreshedTrip);
-                setStep('accepted');
-                acceptedStatusDetected = true;
-                
-                // Set up tracking
-                if (refreshedTrip.ambulanceId) {
-                  const ambulanceId = typeof refreshedTrip.ambulanceId === 'string' 
-                    ? refreshedTrip.ambulanceId 
-                    : refreshedTrip.ambulanceId._id;
-                  
-                  setupAmbulanceTracking(ambulanceId).then(unsubscribe => {
-                    ambulanceTrackingUnsubscribe = unsubscribe;
-                  }).catch(err => {
-                    console.error('Error setting up ambulance tracking:', err);
-                  });
-                }
-              }
-              
-              // Handle any other status
-              if (['ARRIVED', 'PICKED_UP', 'AT_HOSPITAL', 'COMPLETED', 'CANCELLED'].includes(refreshedTrip.status)) {
-                setStep(refreshedTrip.status.toLowerCase());
-              }
-            }
-          } catch (refreshError) {
-            console.warn('Error in initial trip refresh:', refreshError);
-          }
-        };
-        
-        // Call the initial refresh after a short delay
-        setTimeout(forceInitialRefresh, 500);
-      } catch (socketError) {
-        console.error('Error setting up socket subscription:', socketError);
-        // Socket setup failed, but that's okay - we have HTTP polling as backup
-      }
-      
-      // Special double-check timer for the critical REQUESTED state
-      // This is an extra backstop for detecting acceptance
-      if (step === 'found' || step === 'requesting' || step === 'searching') {
-        const doubleCheckInterval = setInterval(async () => {
-          // Only continue if we're still in the waiting phase
-          if (step !== 'found' && step !== 'requesting' && step !== 'searching') {
-            clearInterval(doubleCheckInterval);
-            return;
-          }
-          
-          // If acceptance already detected via other methods
-          if (acceptedStatusDetected) {
-            clearInterval(doubleCheckInterval);
-            return;
-          }
-          
-          console.log('Double-checking trip status...');
-          try {
-            const { get } = await import('@/utils/api');
-            const currentTrip = await get(`/trips/${trip._id}?_dc=${Date.now()}`);
-            
-            if (currentTrip && currentTrip.status === 'ACCEPTED' && step !== 'accepted') {
-              console.log('Double-check found ACCEPTED status, updating UI');
-              setTrip(currentTrip);
-              setStep('accepted');
-              showStatusNotification('Ambulance is on the way');
-              acceptedStatusDetected = true;
-              clearInterval(doubleCheckInterval);
-              
-              // Setup tracking
-              if (currentTrip.ambulanceId) {
-                const ambulanceId = typeof currentTrip.ambulanceId === 'string' 
-                  ? currentTrip.ambulanceId 
-                  : currentTrip.ambulanceId._id;
-                
-                setupAmbulanceTracking(ambulanceId).then(unsubscribe => {
-                  ambulanceTrackingUnsubscribe = unsubscribe;
-                }).catch(err => {
-                  console.error('Error setting up ambulance tracking:', err);
-                });
-              }
-            }
-          } catch (doubleCheckError) {
-            console.warn('Error in status double-check:', doubleCheckError);
-          }
-        }, 7000); // Check every 7 seconds
-        
-        // Return cleanup function for this interval
-        return () => {
-          clearInterval(doubleCheckInterval);
-          if (tripMonitorCleanup) tripMonitorCleanup();
-          if (socketUnsubscribe) socketUnsubscribe();
-          if (ambulanceTrackingUnsubscribe) ambulanceTrackingUnsubscribe();
-        };
-      }
-    }
-    
-    return () => {
-      // Clean up trip monitor
-      if (tripMonitorCleanup) {
-        tripMonitorCleanup();
-      }
-      
-      // Clean up socket subscription
-      if (socketUnsubscribe) {
-        socketUnsubscribe();
-      }
-      
-      // Clean up ambulance tracking
-      if (ambulanceTrackingUnsubscribe) {
-        ambulanceTrackingUnsubscribe();
-      }
-    };
-  }, [trip?._id, step]);
 
   // Format time elapsed
   const formatTimeElapsed = (seconds) => {
@@ -565,13 +794,9 @@ const TripRequestModal = ({
         setTrip(null);
         setError(null);
         setTimeElapsed(0);
-        setSubscriptionsSet(false);
         setRequestInProgress(false);
         tripCreationInProgress = false;
-        
-        // Don't clear trip storage for active trips
-        // Since the trip is still active
-        
+       
         // Clear any intervals
         if (tripTimer) {
           clearInterval(tripTimer);
@@ -586,7 +811,6 @@ const TripRequestModal = ({
       setTrip(null);
       setError(null);
       setTimeElapsed(0);
-      setSubscriptionsSet(false);
       setRequestInProgress(false);
       tripCreationInProgress = false;
       
@@ -605,166 +829,33 @@ const TripRequestModal = ({
     }
   };
 
-  // Helper function to show status notification
-  const showStatusNotification = (message, type = 'success') => {
-    // Create notification element
-    const notificationEl = document.createElement('div');
-    notificationEl.className = `fixed top-4 right-4 px-4 py-3 rounded z-50 flex items-center ${
-      type === 'success' ? 'bg-green-100 border border-green-400 text-green-700' : 'bg-red-100 border border-red-400 text-red-700'
-    }`;
+  // Manual refresh function
+  const handleManualRefresh = useCallback(async () => {
+    if (!trip || !trip._id) {
+      console.warn('Cannot refresh: No trip ID available');
+      return;
+    }
     
-    // Icon based on type
-    const iconSvg = type === 'success' 
-      ? '<svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>'
-      : '<svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>';
-    
-    notificationEl.innerHTML = `
-      ${iconSvg}
-      <p>${message}</p>
-    `;
-    
-    // Add to body
-    document.body.appendChild(notificationEl);
-    
-    // Remove after delay
-    setTimeout(() => {
-      document.body.removeChild(notificationEl);
-    }, 5000);
-  };
-
-  // Add this new function to perform periodic status checks specifically for the critical REQUESTED state
-  const checkForAcceptedStatus = async (tripId) => {
-    if (!tripId) return;
-    
-    // Keep track of how many checks we've done
-    let checkCount = 0;
-    const maxChecks = 60; // Check more frequently, up to 10 minutes (10 seconds × 60)
-    
-    // Create an interval that will check every 5 seconds
-    const statusCheckInterval = setInterval(async () => {
-      try {
-        checkCount++;
-        console.log(`Performing status check #${checkCount} for trip ${tripId}`);
-        
-        // Fetch the latest trip data - use different endpoints for redundancy
-        const { get } = await import('@/utils/api');
-        
-        // Alternate between endpoints for better reliability
-        let endpoint;
-        // Change endpoint pattern to be more varied for better redundancy
-        if (checkCount % 5 === 0) {
-          // Every 5th request, use the force refresh endpoint
-          endpoint = `/trips/${tripId}/status/refresh`;
-        } else if (checkCount % 3 === 0) {
-          // Every 3rd request, use trip endpoint with cache busting
-          endpoint = `/trips/${tripId}?_t=${Date.now()}`;
-        } else {
-          // Otherwise use the standard endpoint
-          endpoint = `/trips/${tripId}`;
-        }
-        
-        let latestTrip;
-        try {
-          latestTrip = await get(endpoint);
-        } catch (fetchError) {
-          console.error(`Error fetching trip status (check #${checkCount}):`, fetchError);
-          
-          // On error, try the alternate endpoint immediately
-          try {
-            const fallbackEndpoint = endpoint.includes('refresh') ? 
-              `/trips/${tripId}` : 
-              `/trips/${tripId}/status/refresh`;
-              
-            console.log(`Trying fallback endpoint: ${fallbackEndpoint}`);
-            latestTrip = await get(fallbackEndpoint);
-            console.log('Fallback fetch successful:', latestTrip);
-          } catch (fallbackError) {
-            console.error('Fallback fetch also failed:', fallbackError);
-            // Continue to next interval
-            return;
-          }
-        }
-        
-        // If for some reason we didn't get a trip, don't try to process it
-        if (!latestTrip || !latestTrip.status) {
-          console.warn('Received invalid trip data during status check:', latestTrip);
-          return;
-        }
-        
-        console.log(`Current trip status: ${latestTrip.status} (check #${checkCount})`);
-        
-        // If the trip is no longer in REQUESTED state, we can stop checking
-        if (latestTrip.status !== 'REQUESTED') {
-          console.log(`Trip status changed to ${latestTrip.status}, stopping checks`);
-          clearInterval(statusCheckInterval);
-          
-          // If for some reason the UI hasn't updated yet, force an update
-          if (latestTrip.status === 'ACCEPTED' && (step === 'found' || step === 'searching' || step === 'requesting')) {
-            console.log('Trip was ACCEPTED but UI shows older state - forcing update');
-            setTrip(latestTrip);
-            setStep('accepted');
-            
-            showStatusNotification('Ambulance is on the way');
-            
-            // Also try to get ambulance info
-            if (latestTrip.ambulanceId) {
-              try {
-                const ambulanceId = typeof latestTrip.ambulanceId === 'string' 
-                  ? latestTrip.ambulanceId 
-                  : latestTrip.ambulanceId._id;
-                  
-                if (ambulanceId) {
-                  console.log('Setting up location subscription for ambulance after acceptance:', ambulanceId);
-                  setupAmbulanceTracking(ambulanceId).catch(err => {
-                    console.warn('Failed to set up ambulance tracking after acceptance:', err);
-                  });
-                }
-              } catch (err) {
-                console.warn('Error setting up ambulance tracking after acceptance:', err);
-              }
-            }
-          } else if (latestTrip.status === 'CANCELLED' && step !== 'error') {
-            console.log('Trip was CANCELLED but UI does not reflect this - updating UI');
-            setTrip(latestTrip);
-            setStep('error');
-            setError('Trip was cancelled by the provider');
-            showStatusNotification('Trip has been cancelled', 'error');
-            cleanupTripStorage();
-          }
-        }
-        
-        // If we get the trip data but it's still in REQUESTED state, but we're not
-        // in the right UI state, correct it
-        if (latestTrip.status === 'REQUESTED' && step !== 'found') {
-          console.log('Trip is still in REQUESTED state, updating UI to show "found" state');
-          setTrip(latestTrip);
-          setStep('found');
-        }
-        
-        // Adjust check frequency dynamically - check more often as we near completion
-        if (checkCount > 30 && statusCheckInterval._idleTimeout > 5000) {
-          // If we've been checking for a while, start checking more frequently
-          console.log('Increasing check frequency to every 5 seconds');
-          clearInterval(statusCheckInterval);
-          const newInterval = setInterval(statusCheckInterval._onTimeout, 5000);
-          Object.assign(statusCheckInterval, newInterval);
-        }
-        
-        // Stop checking after max checks
-        if (checkCount >= maxChecks) {
-          console.log('Reached maximum status checks, stopping');
-          clearInterval(statusCheckInterval);
-        }
-      } catch (error) {
-        console.error('Error checking trip status:', error);
-        // Don't clear the interval on error, keep trying
+    try {
+      setRefreshing(true);
+      console.log('Manual refresh for trip:', trip._id);
+      
+      const freshTrip = await directFetchTripStatus(trip._id);
+      
+      if (freshTrip) {
+        console.log('Manual refresh successful:', freshTrip);
+        updateTripStatus(freshTrip, 'MANUAL-REFRESH');
+      } else {
+        console.warn('Manual refresh returned no data');
       }
-    }, 5000); // Check every 5 seconds (was 10 seconds)
-    
-    // Return the interval so it can be cleared if needed
-    return statusCheckInterval;
-  };
+    } catch (error) {
+      console.error('Error during manual refresh:', error);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [trip, directFetchTripStatus, updateTripStatus]);
 
+  // Don't render anything if modal is closed
   if (!isOpen) return null;
 
   return (
@@ -780,8 +871,8 @@ const TripRequestModal = ({
               {step === 'found' && 'Waiting for Driver Acceptance'}
               {step === 'accepted' && 'Ambulance on the Way'}
               {step === 'arrived' && 'Ambulance Arrived'}
-              {step === 'pickedUp' && 'On the Way to Hospital'}
-              {step === 'atHospital' && 'Arrived at Hospital'}
+              {step === 'pickedup' && 'On the Way to Hospital'}
+              {step === 'athospital' && 'Arrived at Hospital'}
               {step === 'completed' && 'Trip Completed'}
               {step === 'error' && 'Request Failed'}
             </h2>
@@ -797,6 +888,50 @@ const TripRequestModal = ({
         
         {/* Content */}
         <div className="p-4">
+          {/* Debug info and refresh button */}
+          {trip && trip._id && (
+            <div className="mb-4 p-2 bg-gray-100 rounded">
+              <div className="flex justify-between items-center text-sm">
+                <div>
+                  <span className="text-gray-500">Trip:</span> {trip._id.substring(0, 8)}...
+                </div>
+                <div>
+                  <span className="text-gray-500">Status:</span> {trip.status}
+                </div>
+                <div>
+                  <span className="text-gray-500">UI:</span> {step}
+                </div>
+              </div>
+              <div className="mt-2 flex justify-between items-center">
+                <div className="text-xs text-gray-500">
+                  Last update: {lastRefresh.toLocaleTimeString()}
+                  {socketConnected ? (
+                    <span className="ml-2 text-green-500">● Socket connected</span>
+                  ) : (
+                    <span className="ml-2 text-red-500">● Socket disconnected</span>
+                  )}
+                </div>
+                <button
+                  onClick={handleManualRefresh}
+                  className="flex items-center text-xs px-2 py-1 bg-blue-500 text-white rounded hover:bg-blue-600"
+                  disabled={refreshing}
+                >
+                  {refreshing ? (
+                    <span className="flex items-center">
+                      <FiRefreshCw className="animate-spin mr-1 h-3 w-3" />
+                      Refreshing...
+                    </span>
+                  ) : (
+                    <span className="flex items-center">
+                      <FiRefreshCw className="mr-1 h-3 w-3" />
+                      Refresh Status
+                    </span>
+                  )}
+                </button>
+              </div>
+            </div>
+          )}
+          
           {/* Error state */}
           {step === 'error' && (
             <div className="bg-red-50 border-l-4 border-red-400 p-4 mb-4">
@@ -817,11 +952,21 @@ const TripRequestModal = ({
               <p className="text-gray-600">
                 {step === 'requesting' ? 'Preparing your request...' : 'Sending your ambulance request...'}
               </p>
+              
+              {/* Add this if trip exists but still in searching state */}
+              {step === 'searching' && trip && trip._id && (
+                <button
+                  onClick={handleManualRefresh}
+                  className="mt-4 px-4 py-2 bg-blue-500 text-white rounded-md hover:bg-blue-600"
+                >
+                  Check Status
+                </button>
+              )}
             </div>
-          )}
-          
+          )}   
+
           {/* Trip information - Show when trip is created */}
-          {trip && ['found', 'accepted', 'arrived', 'pickedUp', 'atHospital', 'completed'].includes(step) && (
+          {trip && ['found', 'accepted', 'arrived', 'pickedup', 'athospital', 'completed'].includes(step) && (
             <div className="space-y-4">
               {/* Status indicator */}
               <div className="flex items-center justify-center">
@@ -834,8 +979,8 @@ const TripRequestModal = ({
                     {step === 'found' && 'Waiting for ambulance driver to accept your request'}
                     {step === 'accepted' && 'Ambulance is on the way to your location'}
                     {step === 'arrived' && 'Ambulance has arrived at your location'}
-                    {step === 'pickedUp' && 'On the way to hospital'}
-                    {step === 'atHospital' && 'Arrived at hospital'}
+                    {step === 'pickedup' && 'On the way to hospital'}
+                    {step === 'athospital' && 'Arrived at hospital'}
                     {step === 'completed' && 'Trip completed successfully'}
                   </span>
                 </div>
@@ -919,6 +1064,7 @@ const TripRequestModal = ({
                   </div>
                 </div>
                 
+
                 {/* Show real-time ambulance location if available */}
                 {ambulanceLocation && (
                   <div className="mt-4 pt-4 border-t border-gray-200">
@@ -950,7 +1096,24 @@ const TripRequestModal = ({
         </div>
         
         {/* Footer */}
-        <div className="p-4 border-t bg-gray-50 flex justify-end">
+        <div className="p-4 border-t bg-gray-50 flex justify-end space-x-3">
+          {/* Only show debug button during development */}
+          {process.env.NODE_ENV === 'development' && trip && trip._id && (
+            <button
+              onClick={async () => {
+                try {
+                  console.log('Trip details:', trip);
+                  alert(`Current trip status: ${trip.status}\nUI step: ${step}`);
+                } catch (error) {
+                  console.error('Debug error:', error);
+                }
+              }}
+              className="px-3 py-1 text-xs bg-gray-500 text-white rounded"
+            >
+              Debug
+            </button>
+          )}
+          
           {['found', 'accepted', 'arrived'].includes(step) ? (
             <button
               onClick={handleCancelTrip}

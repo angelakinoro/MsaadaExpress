@@ -25,6 +25,8 @@ const ProviderDashboard = () => {
   const [error, setError] = useState(null);
   const [socketConnected, setSocketConnected] = useState(false);
 
+
+  
 // ProviderDashboard protection 
 useEffect(() => {
   if (!authLoading) {  // Only run this after auth has been checked
@@ -63,20 +65,35 @@ useEffect(() => {
         
         // For development, add a fallback mock provider ID if needed
         if (process.env.NODE_ENV === 'development') {
-          console.log('DEVELOPMENT MODE: Creating temporary provider credentials');
+          console.log('DEVELOPMENT MODE: Checking provider credentials');
           
-          // Manually update the user object temporarily
-          user.providerId = user.providerId || 'dev-provider-' + Date.now();
-          
-          // Store in localStorage for persistence
-          const enhancedUser = {...user};
-          localStorage.setItem('userRole', 'provider');
-          localStorage.setItem('user', JSON.stringify(enhancedUser));
-          
-          console.log('Created temporary provider credentials:', {
-            providerId: user.providerId,
-            userRole: 'provider'
-          });
+          // Check if user already has a provider ID
+          if (user.providerId) {
+            console.log('Using existing provider ID:', user.providerId);
+          } else {
+            // Generate a stable provider ID based on the user's UID
+            // This ensures the same user always gets the same provider ID
+            // while different users get different provider IDs
+            const stableId = `provider-${user.uid.substring(0, 8)}`;
+            
+            // Store this stable ID
+            user.providerId = stableId;
+            
+            // Store in localStorage for persistence
+            const enhancedUser = {...user};
+            localStorage.setItem('userRole', 'provider');
+            localStorage.setItem('user', JSON.stringify(enhancedUser));
+            
+            console.log('Set development provider credentials:', {
+              providerId: user.providerId,
+              userRole: 'provider'
+            });
+            
+            // IMPORTANT: Add debug info to help understand why trips aren't showing
+            console.log('NOTE: In development mode, trips in the database must be associated with:');
+            console.log(`Provider ID: ${stableId}`);
+            console.log('If you\'re not seeing trips, you may need to manually update them in the database');
+          }
           
           return;
         }
@@ -146,6 +163,7 @@ useEffect(() => {
   }, [user]);
 
 // Setup socket connection for real-time updates
+// Setup socket connection for real-time updates
 useEffect(() => {
   if (!user || !user.uid) return;
   
@@ -163,16 +181,39 @@ useEffect(() => {
   
   // Create a local socketFailed flag to use for refresh interval timing
   const socketFailed = !socket || !socket.connected;
-  
-  // Only proceed with socket operations if we have a socket
-  if (socket) {
-    try {
-      authenticateProvider(user.uid);
-    } catch (e) {
-      console.error("Provider authentication error:", e);
-    }
     
-    // Add socket connection status listeners
+  const cleanupEvents = [
+    'authenticationConfirmed',
+    'subscriptionConfirmed',
+    'newTripRequest',
+    'notification',
+    'connect',
+    'disconnect',
+    'connect_error',
+    'tripUpdate'
+  ];
+  
+  // CONSOLIDATED EVENT LISTENERS SETUP - all in one place
+  if (socket) {  
+    // Authentication events
+    socket.on('authenticationConfirmed', (data) => {
+      console.log('Authentication confirmed:', data);
+      if (data.type === 'provider') {
+        console.log('Successfully authenticated as provider, ready to receive trip updates');
+        
+        // Only after confirmed authentication, subscribe to new trips
+        socket.emit('subscribeNewTrips');
+      }
+    });
+    
+    socket.on('subscriptionConfirmed', (data) => {
+      console.log('Subscription confirmed:', data);
+      if (data.type === 'newTrips' && data.success) {
+        console.log('Successfully subscribed to new trip requests');
+      }
+    });
+    
+    // Connection events
     socket.on('connect', () => {
       console.log('Socket connected');
       setSocketConnected(true);
@@ -194,35 +235,106 @@ useEffect(() => {
       console.error('Socket connection error:', error);
       setSocketConnected(false);
     });
+    
+    // Trip update events - moved from setupTripSubscription
+    socket.on('newTripRequest', (newTrip) => {
+      console.log('New trip request received via newTripRequest event:', newTrip);
+      if (!newTrip || !newTrip._id) {
+        console.warn('Received invalid trip data');
+        return;
+      }
+      
+      setActiveTrips(prev => {
+        // Check if this trip is already in the list
+        const exists = prev.some(trip => trip._id === newTrip._id);
+        if (!exists) {
+          console.log('Adding new trip to dashboard:', newTrip);
+          return [newTrip, ...prev];
+        }
+        return prev;
+      });
+    });
+    
+    // Notification events - moved from setupTripSubscription
+    socket.on('notification', (notification) => {
+      console.log('Notification received:', notification);
+      if (notification && notification.type === 'NEW_TRIP_REQUEST' && notification.trip) {
+        const newTrip = notification.trip;
+        console.log('New trip from notification:', newTrip);
+        
+        setActiveTrips(prev => {
+          // Check if this trip is already in the list
+          const exists = prev.some(trip => trip._id === newTrip._id);
+          if (!exists) {
+            console.log('Adding new trip from notification to dashboard:', newTrip);
+            return [newTrip, ...prev];
+          }
+          return prev;
+        });
+      }
+    });
+    
+    // General trip updates
+    socket.on('tripUpdate', (data) => {
+      if (!data || !data.trip) return;
+      
+      console.log('Trip update received:', data);
+      const updatedTrip = data.trip;
+      
+      // Handle terminal statuses
+      if (['COMPLETED', 'CANCELLED'].includes(updatedTrip.status)) {
+        setActiveTrips(prev => prev.filter(trip => trip._id !== updatedTrip._id));
+      } 
+      // Handle updating existing trips
+      else {
+        setActiveTrips(prev => {
+          const exists = prev.some(trip => trip._id === updatedTrip._id);
+          
+          if (exists) {
+            // Update existing trip
+            return prev.map(trip => 
+              trip._id === updatedTrip._id ? updatedTrip : trip
+            );
+          } else if (updatedTrip.status === 'REQUESTED') {
+            // Add new trip if it's a requested one
+            return [updatedTrip, ...prev];
+          }
+          return prev;
+        });
+      }
+    });
+    
+    // Authenticate provider
+    console.log('Authenticating provider with ID:', user.uid);
+    authenticateProvider(user.uid);
   }
   
-  // Setup trip subscription with error handling
-  let tripSubscriptionCleanup = () => {};
+  // SIMPLIFIED TRIP SUBSCRIPTION - no duplicate listeners
   const setupTripSubscription = async () => {
     try {
       // Always refresh trips regardless of socket state
       const latestTrips = await getTrips('REQUESTED,ACCEPTED,ARRIVED,PICKED_UP,AT_HOSPITAL');
-      setActiveTrips(latestTrips);
+      console.log('Initial trips loaded:', latestTrips);
+      setActiveTrips(latestTrips || []);
       
       // Only subscribe if socket is connected
       if (socket && socket.connected) {
-        tripSubscriptionCleanup = subscribeNewTrips((newTrip) => {
-          console.log('New trip request received:', newTrip);
-          setActiveTrips(prev => {
-            const exists = prev.some(trip => trip._id === newTrip._id);
-            if (!exists) {
-              return [newTrip, ...prev];
-            }
-            return prev;
-          });
+        // REMOVED: Don't add duplicate listeners here
+        // Just use the subscription for any backend coordination
+        return subscribeNewTrips((newTrip) => {
+          console.log('New trip request received from subscription:', newTrip);
+          // We already have listeners for this, so this is just a backup
         });
       }
+      return () => {};
     } catch (err) {
       console.error('Error setting up trip subscription:', err);
+      return () => {};
     }
   };
   
-  setupTripSubscription();
+  // Set up trip subscription
+  let tripSubscriptionCleanup = setupTripSubscription();
   
   // Subscribe to ambulance status updates
   let ambulanceUnsubscribe = () => {};
@@ -240,119 +352,152 @@ useEffect(() => {
       });
       
       // Store the unsubscribe function
-      ambulanceUnsubscribe = typeof unsubscribe === 'function' ? unsubscribe : () => {};
-      
-      return ambulanceUnsubscribe;
+      return typeof unsubscribe === 'function' ? unsubscribe : () => {};
     } catch (err) {
       console.error('Error setting up ambulance status updates:', err);
       return () => {};
     }
   };
   
-  setupAmbulanceUpdates();
+  // Setup ambulance updates
+  ambulanceUnsubscribe = setupAmbulanceUpdates();
   
-  // Determine refresh interval based on socket status
-  const refreshInterval = setInterval(async () => {
+  // Create a tracking variable for in-progress refreshes
+  let isRefreshing = false;
+  
+  // Create a refresh dashboard function
+  const refreshDashboard = async (refreshType = 'all') => {
+    // Skip if already refreshing unless it's a critical refresh
+    if (isRefreshing && refreshType !== 'force') {
+      console.log(`Skipping ${refreshType} refresh - already in progress`);
+      return;
+    }
+    
     try {
+      isRefreshing = true;
+      
       // Check socket status
       const currentSocket = getSocket();
       setSocketConnected(!!currentSocket && currentSocket.connected);
       
-      // Use allSettled to handle partial failures
-      const [tripsResult, ambulancesResult] = await Promise.allSettled([
-        getTrips('REQUESTED,ACCEPTED,ARRIVED,PICKED_UP,AT_HOSPITAL'),
-        getProviderAmbulances()
-      ]);
+      console.log(`Dashboard refresh (${refreshType} mode)`);
       
-      // Log refresh result
-      console.log(`Dashboard refresh (${!currentSocket || !currentSocket.connected ? 'aggressive' : 'normal'} mode)`);
-      
-      // Handle trips result
-      if (tripsResult.status === 'fulfilled' && Array.isArray(tripsResult.value)) {
-        console.log(`- ${tripsResult.value.length} trips loaded successfully`);
-        setActiveTrips(tripsResult.value);
-      } else if (tripsResult.status === 'rejected') {
-        console.error('Error refreshing trips:', tripsResult.reason);
-      }
-      
-      // Handle ambulances result
-      if (ambulancesResult.status === 'fulfilled' && Array.isArray(ambulancesResult.value)) {
-        console.log(`- ${ambulancesResult.value.length} ambulances loaded successfully`);
-        setAmbulances(ambulancesResult.value);
-      } else if (ambulancesResult.status === 'rejected') {
-        console.error('Error refreshing ambulances:', ambulancesResult.reason);
-      }
-      
-      // Only show error if both failed
-      if (tripsResult.status === 'rejected' && ambulancesResult.status === 'rejected') {
-        setError('Failed to refresh data. Will try again soon.');
+      // Handle different refresh types
+      if (refreshType === 'requested-only') {
+        // Only refresh requested trips for lighter polling
+        try {
+          const requestedTrips = await getTrips('REQUESTED');
+          
+          if (Array.isArray(requestedTrips) && requestedTrips.length > 0) {
+            console.log(`- ${requestedTrips.length} requested trips loaded`);
+            
+            // Update state with any new trips
+            setActiveTrips(prev => {
+              const prevIds = new Set(prev.map(trip => trip._id));
+              let updated = false;
+              
+              // Add any new trips
+              const newState = [...prev];
+              for (const trip of requestedTrips) {
+                if (!prevIds.has(trip._id)) {
+                  console.log('Adding new requested trip from polling:', trip);
+                  newState.unshift(trip); // Add to beginning
+                  updated = true;
+                }
+              }
+              
+              return updated ? newState : prev;
+            });
+          }
+        } catch (err) {
+          console.error('Error polling for requested trips:', err);
+        }
       } else {
-        // Clear any previous refresh errors if at least one succeeded
-        setError(prev => prev && prev.includes('refresh') ? null : prev);
+        // Full refresh of trips and ambulances
+        const [tripsResult, ambulancesResult] = await Promise.allSettled([
+          getTrips('REQUESTED,ACCEPTED,ARRIVED,PICKED_UP,AT_HOSPITAL'),
+          getProviderAmbulances()
+        ]);
+        
+        // Handle trips result
+        if (tripsResult.status === 'fulfilled' && Array.isArray(tripsResult.value)) {
+          console.log(`- ${tripsResult.value.length} trips loaded successfully`);
+          setActiveTrips(tripsResult.value);
+        } else if (tripsResult.status === 'rejected') {
+          console.error('Error refreshing trips:', tripsResult.reason);
+        }
+        
+        // Handle ambulances result
+        if (ambulancesResult.status === 'fulfilled' && Array.isArray(ambulancesResult.value)) {
+          console.log(`- ${ambulancesResult.value.length} ambulances loaded successfully`);
+          setAmbulances(ambulancesResult.value);
+        } else if (ambulancesResult.status === 'rejected') {
+          console.error('Error refreshing ambulances:', ambulancesResult.reason);
+        }
+        
+        // Only show error if both failed
+        if (tripsResult.status === 'rejected' && ambulancesResult.status === 'rejected') {
+          setError('Failed to refresh data. Will try again soon.');
+        } else {
+          // Clear any previous refresh errors if at least one succeeded
+          setError(prev => prev && prev.includes('refresh') ? null : prev);
+        }
+      }
+      
+      // Check for socket reconnection if needed
+      if ((!currentSocket || !currentSocket.connected) && refreshType === 'reconnect') {
+        console.log('Attempting to recover socket connection...');
+        
+        // Try to reinitialize socket
+        const reconnectedSocket = initializeSocket();
+        setSocketConnected(!!reconnectedSocket);
+        
+        if (reconnectedSocket) {
+          // If successful, re-authenticate and update subscriptions
+          authenticateProvider(user.uid);
+        }
       }
     } catch (error) {
-      console.error('Error in refresh interval:', error);
-      
-      // If we get an error, try one more time after a short delay
-      setTimeout(async () => {
-        try {
-          const [retryTripsResult, retryAmbulancesResult] = await Promise.allSettled([
-            getTrips('REQUESTED,ACCEPTED,ARRIVED,PICKED_UP,AT_HOSPITAL'),
-            getProviderAmbulances()
-          ]);
-          
-          // Only update state for successful results
-          if (retryTripsResult.status === 'fulfilled') {
-            setActiveTrips(retryTripsResult.value);
-          }
-          
-          if (retryAmbulancesResult.status === 'fulfilled') {
-            setAmbulances(retryAmbulancesResult.value);
-          }
-        } catch (retryError) {
-          console.error('Error in retry refresh:', retryError);
-        }
-      }, 2000);
+      console.error('Error in dashboard refresh:', error);
+    } finally {
+      isRefreshing = false;
     }
-  }, socketFailed ? 5000 : 30000); // Use the local socketFailed variable
+  };
   
-  // Setup socket reconnection every 30 seconds if socket is in fallback mode
+  // Set up main refresh interval - adaptive based on socket status
+  const mainInterval = setInterval(() => {
+    // Does full refresh
+    refreshDashboard('all');
+  }, socketConnected ? 30000 : 10000); // Less frequent when socket is working
+  
+  // Light polling just for new trip requests
+  const requestedTripsInterval = setInterval(() => {
+    // Lighter refresh just for requested trips
+    refreshDashboard('requested-only');
+  }, 15000);
+  
+  // Set up reconnection attempt interval
   const reconnectInterval = setInterval(() => {
-    // Check if we should try to reconnect
-    const currentSocket = getSocket();
-    const shouldReconnect = !currentSocket || !currentSocket.connected;
-    
-    if (shouldReconnect) {
-      console.log('Attempting to recover socket connection...');
-      
-      // Try to reinitialize socket
-      const reconnectedSocket = initializeSocket();
-      setSocketConnected(!!reconnectedSocket);
-      
-      if (reconnectedSocket) {
-        // If successful, re-authenticate and update subscriptions
-        authenticateProvider(user.uid);
-        
-        // Clean up existing subscriptions
-        if (tripSubscriptionCleanup) {
-          tripSubscriptionCleanup();
-        }
-        
-        if (ambulanceUnsubscribe) {
-          ambulanceUnsubscribe();
-        }
-        
-        // Setup new subscriptions
-        setupTripSubscription();
-        setupAmbulanceUpdates();
-      }
-    }
+    refreshDashboard('reconnect');
   }, 30000);
   
   // Cleanup
   return () => {
-    // Only call cleanup if they exist
-    if (tripSubscriptionCleanup) {
+    console.log('Cleaning up provider dashboard resources');
+    
+    // Clean up socket event listeners
+    if (socket) {
+      cleanupEvents.forEach(event => { 
+        try {
+          socket.off(event);
+        } catch (e) {
+          console.warn(`Error removing ${event} listener:`, e);
+        }
+      });
+    }
+      
+    // Trip subscription cleanup
+    if (typeof tripSubscriptionCleanup === 'function') {
       try {
         tripSubscriptionCleanup();
       } catch (e) {
@@ -360,7 +505,8 @@ useEffect(() => {
       }
     }
     
-    if (ambulanceUnsubscribe) {
+    // Ambulance updates cleanup
+    if (typeof ambulanceUnsubscribe === 'function') {
       try {
         ambulanceUnsubscribe();
       } catch (e) {
@@ -368,11 +514,45 @@ useEffect(() => {
       }
     }
     
-    clearInterval(refreshInterval);
+    // Clear intervals
+    clearInterval(mainInterval);
+    clearInterval(requestedTripsInterval);
     clearInterval(reconnectInterval);
   };
 }, [user]);
 
+// getting provider id
+useEffect(() => {
+  if (user) {
+    // Force the correct provider ID that matches what's in your MongoDB
+    const correctProviderId = '682665c66482acd3263499b2'; // This should match your MongoDB provider ID
+    
+    // Update localStorage
+    try {
+      const userData = JSON.parse(localStorage.getItem('user') || '{}');
+      userData.providerId = correctProviderId;
+      localStorage.setItem('user', JSON.stringify(userData));
+      
+      // Update user object
+      user.providerId = correctProviderId;
+      
+      console.log('Provider ID set to match database:', correctProviderId);
+    } catch (e) {
+      console.error('Error updating provider ID:', e);
+    }
+    
+    // Force fetch trips immediately after ID fix
+    setTimeout(async () => {
+      try {
+        const trips = await getTrips('REQUESTED,ACCEPTED,ARRIVED,PICKED_UP,AT_HOSPITAL');
+        console.log('Trips after ID fix:', trips);
+        setActiveTrips(trips || []);
+      } catch (err) {
+        console.error('Error fetching trips after ID fix:', err);
+      }
+    }, 1000);
+  }
+}, [user]);
 
   const handleStatusUpdate = async (ambulanceId, newStatus) => {
   try {
@@ -426,43 +606,57 @@ useEffect(() => {
   }
 };
 
-  // Handle trip status update
-  const handleTripStatusUpdate = async (tripId, newStatus) => {
-    try {
-      // Update UI first for immediate feedback
-      setActiveTrips(prev => 
-        prev.map(trip => 
-          trip._id === tripId ? { ...trip, status: newStatus, isUpdating: true } : trip
-        )
-      );
+// Handle trip status update
+const handleTripStatusUpdate = async (tripId, newStatus) => {
+  try {
+    // Update UI first for immediate feedback
+    setActiveTrips(prev => 
+      prev.map(trip => 
+        trip._id === tripId ? { ...trip, status: newStatus, isUpdating: true } : trip
+      )
+    );
+    
+    // Call the API to update the status
+    const updatedTrip = await updateTripStatus(tripId, newStatus);
+    console.log('Trip status update successful:', updatedTrip);
+    
+    // Handle COMPLETED or CANCELLED status - remove from active trips
+    if (newStatus === 'COMPLETED' || newStatus === 'CANCELLED') {
+      console.log(`Trip ${tripId} is now ${newStatus}, removing from active trips`);
+      setActiveTrips(prev => prev.filter(trip => trip._id !== tripId));
       
-      // Call the API to update the status
-      const updatedTrip = await updateTripStatus(tripId, newStatus);
-      console.log('Trip status update successful:', updatedTrip);
-      
-      // Handle COMPLETED or CANCELLED status - remove from active trips
-      if (newStatus === 'COMPLETED' || newStatus === 'CANCELLED') {
-        setActiveTrips(prev => prev.filter(trip => trip._id !== tripId));
-      } else {
-        // Update trip in the list
-        setActiveTrips(prev => 
-          prev.map(trip => 
-            trip._id === tripId ? { ...updatedTrip, isUpdating: false } : trip
-          )
-        );
+      // NEW: Store trip status in sessionStorage to signal other components
+      try {
+        sessionStorage.setItem(`trip_${tripId}_status`, newStatus);
+        sessionStorage.setItem(`trip_${tripId}_update_time`, new Date().toISOString());
+        console.log(`Stored trip status in sessionStorage: ${tripId} -> ${newStatus}`);
+      } catch (e) {
+        console.warn('Failed to store trip status in sessionStorage:', e);
       }
-    } catch (error) {
-      console.error('Error updating trip status:', error);
-      setError('Failed to update trip status. Please try again.');
-      
-      // Reset the updating state
+    } else {
+      // Update trip in the list
       setActiveTrips(prev => 
         prev.map(trip => 
-          trip._id === tripId ? { ...trip, status: trip.status, isUpdating: false } : trip
+          trip._id === tripId ? { ...updatedTrip, isUpdating: false } : trip
         )
       );
-      
-      // Refresh to get current state
+    }
+  } catch (error) {
+    console.error('Error updating trip status:', error);
+    setError('Failed to update trip status. Please try again.');
+    
+    // Reset the updating state
+    setActiveTrips(prev => 
+      prev.map(trip => 
+        trip._id === tripId ? { ...trip, status: trip.status, isUpdating: false } : trip
+      )
+    );
+    
+    // Use our new refreshDashboard function if you've implemented it
+    if (typeof refreshDashboard === 'function') {
+      refreshDashboard('force');
+    } else {
+      // Otherwise, use your original refresh logic
       try {
         const refreshedTrips = await getTrips('REQUESTED,ACCEPTED,ARRIVED,PICKED_UP,AT_HOSPITAL');
         setActiveTrips(refreshedTrips);
@@ -470,7 +664,8 @@ useEffect(() => {
         console.error('Error refreshing trips list:', refreshError);
       }
     }
-  };
+  }
+};
 
   const handleDelete = async (ambulanceId) => {
     if (window.confirm('Are you sure you want to delete this ambulance?')) {
@@ -484,13 +679,15 @@ useEffect(() => {
     }
   };
 
+  
+
   if (!user) {
     return (
       <div className="min-h-screen bg-gray-100 flex items-center justify-center">
         <div className="text-center">
           <h1 className="text-2xl font-bold text-gray-800 mb-4">Please log in to access the provider dashboard</h1>
           <button
-            onClick={() => router.push('/auth/login')}
+            onClick={() => router.push('/provider/login')}
             className="bg-red-500 text-white px-6 py-2 rounded-lg hover:bg-red-600"
           >
             Log In
@@ -536,6 +733,23 @@ useEffect(() => {
                 <GiAmbulance className="mr-2" />
                 Add New Ambulance
               </button>
+
+            <button
+            onClick={async () => {
+              setLoading(true);
+              const trips = await directFetchTest();
+              if (trips) {
+                setActiveTrips(trips);
+                setError(`Found ${trips.length} trips with direct fetch`);
+              }
+              setLoading(false);
+            }}
+            className="bg-blue-500 text-white px-4 py-2 rounded-lg"
+          >
+            Try Direct Fetch
+          </button>
+
+
             </div>
           </div>
 
@@ -742,3 +956,36 @@ useEffect(() => {
 };
 
 export default ProviderDashboard;
+
+const directFetchTest = async () => {
+  try {
+    // Get token from localStorage
+    const authToken = localStorage.getItem('authToken');
+    
+    if (!authToken) {
+      alert("No auth token found in localStorage. Please log in again.");
+      return;
+    }
+    
+    // Make direct fetch request
+    const response = await fetch('http://localhost:5000/api/trips', {
+      headers: {
+        'Authorization': `Bearer ${authToken}`
+      }
+    });
+    
+    if (!response.ok) {
+      alert(`API error: ${response.status}`);
+      return;
+    }
+    
+    const data = await response.json();
+    console.log('Direct API result:', data);
+    
+    return data;
+  } catch (error) {
+    console.error('Error:', error);
+    alert('Error: ' + error.message);
+    return null;
+  }
+};
